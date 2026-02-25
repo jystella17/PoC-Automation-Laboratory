@@ -2,22 +2,22 @@
 
 ## Supervisor Agent + FastAPI + Streamlit
 
-### 1) ÀÇÁ¸¼º ¼³Ä¡
+### 1) ì˜ì¡´ì„± ì„¤ì¹˜
 ```bash
 pip install -r requirements-supervisor.txt
 ```
 
-### 2) FastAPI ½ÇÇà
+### 2) FastAPI ì‹¤í–‰
 ```bash
 uvicorn apps.supervisor_api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 3) Streamlit UI ½ÇÇà
+### 3) Streamlit UI ì‹¤í–‰
 ```bash
-streamlit run apps/chat_ui_streamlit.py
+streamlit run ui/chat_ui.py
 ```
 
-### ÁÖ¿ä ¿£µåÆ÷ÀÎÆ®
+### ì£¼ìš” ì—”ë“œí¬ì¸íŠ¸
 - `GET /health`
 - `POST /v1/supervisor/plan`
 - `POST /v1/supervisor/run`
