@@ -1,0 +1,5 @@
+.venv
+./InfraAutoSetting/.venv
+./InfraAutoSetting/.idea
+./SampleAppGen/.venv
+./SampleAppGen/.idea
