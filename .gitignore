@@ -3,3 +3,4 @@
 ./InfraAutoSetting/.idea
 ./SampleAppGen/.venv
 ./SampleAppGen/.idea
+./application-properties.env
