@@ -13,7 +13,7 @@ if "messages" not in st.session_state:
     st.session_state.messages = [
         {
             "role": "assistant",
-            "content": "Enter infra/app requirements. You can also paste UserRequest JSON directly.",
+            "content": "Enter requirements for sample application and infra setting!",
         }
     ]
 
