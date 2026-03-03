@@ -12,7 +12,7 @@ class AzureOpenAISettings(BaseModel):
     endpoint: str = ""
     api_key: str = ""
     deployment_name: str = ""
-    api_version: str = "2024-02-01"
+    api_version: str = ""
     temperature: float = 0.1
 
     @property

@@ -1,7 +1,18 @@
 from __future__ import annotations
 
 from .config import AzureOpenAISettings
-from .models import BuildPlan, MissingRequirement, UserRequest
+from .models import BuildPlan, MissingRequirement, PlanStep, UserRequest
+
+
+SUPERVISOR_SYSTEM_PROMPT = """You are the Supervisor Agent for an infra test automation lab.
+You are also a senior Infra Engineer with 20 years of hands-on experience.
+Your role is to assess user requests, identify missing requirements, and orchestrate infra/app execution safely.
+Prioritize operational correctness, deterministic planning, deployment safety, and explicit assumptions.
+Do not fabricate missing facts. If required information is missing, clearly state that execution is blocked and ask for the exact missing inputs.
+When the request is complete, explain what work will be performed, in what order, and why.
+Do not expose internal implementation labels such as plan, dispatch, build_infra, generate_app, or LangGraph unless the user explicitly asks for them.
+Keep answers concise, structured, practical, and suitable for an engineering handoff.
+"""
 
 
 class SupervisorLLM:
@@ -38,6 +49,24 @@ class SupervisorLLM:
 
         return self._fallback_reply(request, plan)
 
+    def _target_summary(self, request: UserRequest) -> str:
+        if not request.targets:
+            return "없음"
+        return ", ".join(f"{target.host} ({target.user})" for target in request.targets)
+
+    def _humanize_step(self, step: PlanStep) -> str:
+        if step.name == "plan":
+            return "입력된 요구사항과 대상 환경 정보를 검토하고, 바로 실행 가능한 상태인지 확인합니다."
+        if step.name == "build_infra":
+            if step.status == "failed":
+                return "필수 정보가 아직 부족해 인프라 설치 및 환경 구성 작업은 시작할 수 없습니다."
+            return "대상 서버에 필요한 인프라 구성요소를 설치하고, 로그 경로와 기본 실행 환경을 준비합니다."
+        if step.name == "generate_app":
+            if step.status == "failed":
+                return "필수 정보가 아직 부족해 샘플 애플리케이션 생성 및 배포 준비 작업은 시작할 수 없습니다."
+            return "요청한 프레임워크와 언어 기준으로 샘플 애플리케이션을 생성하고, 배포 가능한 산출물을 준비합니다."
+        return step.detail
+
     def _summarize_with_azure(
         self,
         request: UserRequest,
@@ -49,29 +78,38 @@ class SupervisorLLM:
 
         languages = ", ".join(request.app_tech_stack.language) or "none"
         missing_fields = ", ".join(item.field for item in missing_requirements) or "none"
-        prompt = (
-            "You are a supervisor agent for infra test lab planning.\n"
+        human_prompt = (
+            "Respond in Korean.\n"
+            "Write a single planning summary sentence in natural language.\n"
+            "Do not mention internal node names or implementation labels.\n"
             f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
             f"App framework: {request.app_tech_stack.framework}\n"
             f"Languages: {languages}\n"
+            f"Targets: {self._target_summary(request)}\n"
             f"Additional request: {request.additional_request or 'none'}\n"
             f"Missing fields: {missing_fields}\n"
-            "Return one concise planning summary sentence."
+            "If required fields are missing, explicitly say execution is blocked."
         )
 
-        response = llm.invoke(prompt)
+        response = llm.invoke([
+            ("system", SUPERVISOR_SYSTEM_PROMPT),
+            ("human", human_prompt),
+        ])
         content = getattr(response, "content", "")
         if isinstance(content, str) and content.strip():
             return content.strip()
         return None
 
     def _fallback_summary(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
-        components = ", ".join(request.infra_tech_stack.components) or "no components selected"
-        summary = f"Prepared LangGraph workflow for {components} with app framework {request.app_tech_stack.framework}."
+        components = ", ".join(request.infra_tech_stack.components) or "선택된 인프라 구성요소 없음"
+        framework = request.app_tech_stack.framework or "애플리케이션 프레임워크 미지정"
+        summary = f"{components} 환경과 {framework} 애플리케이션 구성을 기준으로 실행 준비 상태를 검토했습니다."
         if request.additional_request.strip():
-            summary += " Included the free-form request in the planning context."
+            summary += " 추가 요청 사항도 함께 반영해 작업 범위를 정리했습니다."
         if missing_requirements:
-            summary += " Execution is blocked until the missing requirements are answered."
+            summary += " 다만 필수 정보가 아직 부족해 실제 작업은 보류된 상태입니다."
+        else:
+            summary += " 필요한 정보가 충족되어 후속 작업을 순서대로 진행할 수 있습니다."
         return summary
 
     def _generate_reply_with_azure(self, request: UserRequest, plan: BuildPlan) -> str | None:
@@ -79,25 +117,31 @@ class SupervisorLLM:
         if llm is None:
             return None
 
-        step_lines = "\n".join(f"- {step.name}: {step.detail}" for step in plan.steps) or "- no steps"
-        missing_lines = "\n".join(f"- {item.field}: {item.question}" for item in plan.missing_requirements) or "- none"
-        prompt = (
-            "You are the Supervisor Agent for an infra test automation lab.\n"
+        step_lines = "\n".join(
+            f"{index}. {self._humanize_step(step)}" for index, step in enumerate(plan.steps, start=1)
+        ) or "1. 현재 수행 예정 작업이 정리되지 않았습니다."
+        missing_lines = "\n".join(f"- {item.question}" for item in plan.missing_requirements) or "- 없음"
+        human_prompt = (
             "Respond in Korean.\n"
-            "Explain the overall execution order clearly and concisely.\n"
+            "Explain the request in user-facing language.\n"
+            "Under the section '수행할 작업 설명', describe the work in natural language instead of internal agent names or plan node names.\n"
             "If required fields are missing, say execution is blocked and ask for the missing answers.\n"
-            "If the request is complete, explain which sub-agents will run in what order.\n"
+            "If the request is complete, explain what will be done first, next, and why.\n"
             f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
-            f"App framework: {request.app_tech_stack.framework}\n"
+            f"App framework: {request.app_tech_stack.framework or 'none'}\n"
             f"Languages: {', '.join(request.app_tech_stack.language) or 'none'}\n"
+            f"Targets: {self._target_summary(request)}\n"
             f"Additional request: {request.additional_request or 'none'}\n"
             f"Plan summary: {plan.summary}\n"
-            f"Plan steps:\n{step_lines}\n"
+            f"Planned work descriptions:\n{step_lines}\n"
             f"Missing requirements:\n{missing_lines}\n"
-            "Return a short structured answer with these sections if relevant: 요청 이해, 실행 순서, 추가 확인 필요."
+            "Return a structured answer with these sections if relevant: 요청 내용, 수행할 작업 설명, 추가 확인 필요."
         )
 
-        response = llm.invoke(prompt)
+        response = llm.invoke([
+            ("system", SUPERVISOR_SYSTEM_PROMPT),
+            ("human", human_prompt),
+        ])
         content = getattr(response, "content", "")
         if isinstance(content, str) and content.strip():
             return content.strip()
@@ -105,10 +149,11 @@ class SupervisorLLM:
 
     def _fallback_reply(self, request: UserRequest, plan: BuildPlan) -> str:
         lines = [
-            "요청 이해",
+            "요청 내용",
             f"- 인프라 기술스택: {', '.join(request.infra_tech_stack.components) or '없음'}",
-            f"- 애플리케이션 프레임워크: {request.app_tech_stack.framework}",
+            f"- 애플리케이션 프레임워크: {request.app_tech_stack.framework or '없음'}",
             f"- 언어: {', '.join(request.app_tech_stack.language) or '없음'}",
+            f"- 대상 서버: {self._target_summary(request)}",
         ]
 
         if request.additional_request.strip():
@@ -117,11 +162,12 @@ class SupervisorLLM:
         lines.append("")
         if plan.missing_requirements:
             lines.append("추가 확인 필요")
+            lines.append("- 필수 정보가 부족해 현재는 실제 작업을 시작할 수 없습니다.")
             for item in plan.missing_requirements:
                 lines.append(f"- {item.question}")
         else:
-            lines.append("실행 순서")
+            lines.append("수행할 작업 설명")
             for index, step in enumerate(plan.steps, start=1):
-                lines.append(f"- {index}. {step.name}: {step.detail}")
+                lines.append(f"- {index}. {self._humanize_step(step)}")
 
         return "\n".join(lines)
