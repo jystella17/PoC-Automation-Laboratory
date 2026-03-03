@@ -5,7 +5,7 @@ import json
 from fastapi import FastAPI, HTTPException
 
 from Supervisor import MissingInfoError, SupervisorAgent
-from Supervisor.models import BuildPlan, ChatRequest, ChatResponse, SupervisorRunResult, UserRequest
+from Supervisor.models import BuildPlan, ChatRequest, ChatResponse, GraphView, SupervisorRunResult, UserRequest
 
 app = FastAPI(title="Supervisor Agent API", version="0.1.0")
 agent = SupervisorAgent()
@@ -21,6 +21,11 @@ async def create_plan(request: UserRequest) -> BuildPlan:
     return agent.plan(request)
 
 
+@app.get("/v1/supervisor/graph", response_model=GraphView)
+async def get_supervisor_graph() -> GraphView:
+    return agent.graph_view()
+
+
 @app.post("/v1/supervisor/run", response_model=SupervisorRunResult)
 async def run_supervisor(request: UserRequest) -> SupervisorRunResult:
     try:
@@ -31,6 +36,7 @@ async def run_supervisor(request: UserRequest) -> SupervisorRunResult:
             detail={
                 "message": "Required fields are missing; unable to execute.",
                 "missing_fields": exc.missing_fields,
+                "missing_requirements": [item.model_dump() for item in exc.missing_requirements],
             },
         ) from exc
 
@@ -52,10 +58,15 @@ async def chat(request: ChatRequest) -> ChatResponse:
     try:
         payload = json.loads(last_user)
         parsed = UserRequest.model_validate(payload)
-        plan = agent.plan(parsed)
-        if plan.missing_info:
-            return ChatResponse(reply="Parsed request. Missing required fields: " + ", ".join(plan.missing_info))
-        return ChatResponse(reply="Parsed request. Execution plan: " + " | ".join(f"{s.name}:{s.detail}" for s in plan.steps))
+        reply, plan = agent.chat_reply(parsed)
+        return ChatResponse(
+            reply=reply,
+            metadata={
+                "missing_info": plan.missing_info,
+                "mermaid": plan.graph.mermaid,
+                "steps": [step.model_dump() for step in plan.steps],
+            },
+        )
     except Exception:
         return ChatResponse(
             reply=(

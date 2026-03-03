@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import Any, List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,13 @@ class UserRequest(BaseModel):
     targets: List[TargetHost] = Field(default_factory=list)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     app_tech_stack: AppTechStack = Field(default_factory=AppTechStack)
+    additional_request: str = ""
+
+
+class MissingRequirement(BaseModel):
+    field: str
+    question: str
+    reason: str
 
 
 class PlanStep(BaseModel):
@@ -68,10 +75,30 @@ class PlanStep(BaseModel):
     detail: str
 
 
+class GraphNode(BaseModel):
+    node_id: str
+    label: str
+    kind: Literal["start", "task", "gate", "end"] = "task"
+
+
+class GraphEdge(BaseModel):
+    source: str
+    target: str
+    condition: str = ""
+
+
+class GraphView(BaseModel):
+    nodes: List[GraphNode] = Field(default_factory=list)
+    edges: List[GraphEdge] = Field(default_factory=list)
+    mermaid: str = ""
+
+
 class BuildPlan(BaseModel):
     summary: str
     missing_info: List[str] = Field(default_factory=list)
+    missing_requirements: List[MissingRequirement] = Field(default_factory=list)
     steps: List[PlanStep] = Field(default_factory=list)
+    graph: GraphView = Field(default_factory=GraphView)
 
 
 class AgentExecution(BaseModel):
@@ -87,6 +114,9 @@ class SupervisorRunResult(BaseModel):
     generated_outputs: List[str]
     recommended_config: List[str]
     rollback_cleanup: List[str]
+    graph: GraphView = Field(default_factory=GraphView)
+    execution_path: List[str] = Field(default_factory=list)
+    final_summary: str = ""
 
 
 class ChatMessage(BaseModel):
@@ -100,3 +130,4 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    metadata: dict[str, Any] = Field(default_factory=dict)

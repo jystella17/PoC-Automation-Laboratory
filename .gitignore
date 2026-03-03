@@ -4,3 +4,4 @@
 ./SampleAppGen/.venv
 ./SampleAppGen/.idea
 ./application-properties.env
+./config/supervisor_settings.json
