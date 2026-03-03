@@ -8,6 +8,20 @@ class SupervisorLLM:
     def __init__(self, settings: AzureOpenAISettings):
         self.settings = settings
 
+    def _create_llm(self):
+        try:
+            from langchain_openai import AzureChatOpenAI
+        except ImportError:
+            return None
+
+        return AzureChatOpenAI(
+            azure_endpoint=self.settings.endpoint,
+            api_key=self.settings.api_key,
+            azure_deployment=self.settings.deployment_name,
+            api_version=self.settings.api_version,
+            temperature=self.settings.temperature,
+        )
+
     def summarize_plan(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
         if self.settings.enabled and self.settings.is_configured:
             azure_summary = self._summarize_with_azure(request, missing_requirements)
@@ -29,24 +43,17 @@ class SupervisorLLM:
         request: UserRequest,
         missing_requirements: list[MissingRequirement],
     ) -> str | None:
-        try:
-            from langchain_openai import AzureChatOpenAI
-        except ImportError:
+        llm = self._create_llm()
+        if llm is None:
             return None
 
-        llm = AzureChatOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            azure_deployment=self.settings.deployment_name,
-            api_version=self.settings.api_version,
-            temperature=self.settings.temperature,
-        )
-
+        languages = ", ".join(request.app_tech_stack.language) or "none"
         missing_fields = ", ".join(item.field for item in missing_requirements) or "none"
         prompt = (
             "You are a supervisor agent for infra test lab planning.\n"
             f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
             f"App framework: {request.app_tech_stack.framework}\n"
+            f"Languages: {languages}\n"
             f"Additional request: {request.additional_request or 'none'}\n"
             f"Missing fields: {missing_fields}\n"
             "Return one concise planning summary sentence."
@@ -68,18 +75,9 @@ class SupervisorLLM:
         return summary
 
     def _generate_reply_with_azure(self, request: UserRequest, plan: BuildPlan) -> str | None:
-        try:
-            from langchain_openai import AzureChatOpenAI
-        except ImportError:
+        llm = self._create_llm()
+        if llm is None:
             return None
-
-        llm = AzureChatOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            azure_deployment=self.settings.deployment_name,
-            api_version=self.settings.api_version,
-            temperature=self.settings.temperature,
-        )
 
         step_lines = "\n".join(f"- {step.name}: {step.detail}" for step in plan.steps) or "- no steps"
         missing_lines = "\n".join(f"- {item.field}: {item.question}" for item in plan.missing_requirements) or "- none"
@@ -91,7 +89,7 @@ class SupervisorLLM:
             "If the request is complete, explain which sub-agents will run in what order.\n"
             f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
             f"App framework: {request.app_tech_stack.framework}\n"
-            f"Language: {request.app_tech_stack.language}\n"
+            f"Languages: {', '.join(request.app_tech_stack.language) or 'none'}\n"
             f"Additional request: {request.additional_request or 'none'}\n"
             f"Plan summary: {plan.summary}\n"
             f"Plan steps:\n{step_lines}\n"
@@ -110,6 +108,7 @@ class SupervisorLLM:
             "요청 이해",
             f"- 인프라 기술스택: {', '.join(request.infra_tech_stack.components) or '없음'}",
             f"- 애플리케이션 프레임워크: {request.app_tech_stack.framework}",
+            f"- 언어: {', '.join(request.app_tech_stack.language) or '없음'}",
         ]
 
         if request.additional_request.strip():

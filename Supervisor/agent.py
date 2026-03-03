@@ -46,6 +46,42 @@ class MissingInfoError(Exception):
         return "Missing required input: " + ", ".join(self.missing_fields)
 
 
+GRAPH_NODES = [
+    GraphNode(node_id="START", label="Start", kind="start"),
+    GraphNode(node_id="plan", label="Plan Request", kind="task"),
+    GraphNode(node_id="dispatch", label="Dispatch Agents", kind="gate"),
+    GraphNode(node_id="build_infra", label="Build Infra", kind="task"),
+    GraphNode(node_id="generate_app", label="Generate App", kind="task"),
+    GraphNode(node_id="finalize", label="Finalize Result", kind="end"),
+    GraphNode(node_id="END", label="End", kind="end"),
+]
+
+GRAPH_EDGES = [
+    GraphEdge(source="START", target="plan"),
+    GraphEdge(source="plan", target="dispatch", condition="mode=run and no missing requirements"),
+    GraphEdge(source="plan", target="finalize", condition="mode=plan or missing requirements"),
+    GraphEdge(source="dispatch", target="build_infra"),
+    GraphEdge(source="dispatch", target="generate_app"),
+    GraphEdge(source="build_infra", target="finalize"),
+    GraphEdge(source="generate_app", target="finalize"),
+    GraphEdge(source="finalize", target="END"),
+]
+
+GRAPH_MERMAID = "\n".join(
+    [
+        "graph TD",
+        "    START([Start]) --> plan[Plan Request]",
+        "    plan -->|mode=run and complete| dispatch{Dispatch Agents}",
+        "    plan -->|mode=plan or blocked| finalize[Finalize Result]",
+        "    dispatch --> build_infra[Build Infra]",
+        "    dispatch --> generate_app[Generate App]",
+        "    build_infra --> finalize",
+        "    generate_app --> finalize",
+        "    finalize --> END([End])",
+    ]
+)
+
+
 class SupervisorAgent:
     def __init__(self, settings: SupervisorSettings | None = None):
         self.settings = settings or load_settings()
@@ -77,42 +113,11 @@ class SupervisorAgent:
         return workflow.compile()
 
     def graph_view(self) -> GraphView:
-        nodes = [
-            GraphNode(node_id="START", label="Start", kind="start"),
-            GraphNode(node_id="plan", label="Plan Request", kind="task"),
-            GraphNode(node_id="dispatch", label="Dispatch Agents", kind="gate"),
-            GraphNode(node_id="build_infra", label="Build Infra", kind="task"),
-            GraphNode(node_id="generate_app", label="Generate App", kind="task"),
-            GraphNode(node_id="finalize", label="Finalize Result", kind="end"),
-            GraphNode(node_id="END", label="End", kind="end"),
-        ]
-        edges = [
-            GraphEdge(source="START", target="plan"),
-            GraphEdge(source="plan", target="dispatch", condition="mode=run and no missing requirements"),
-            GraphEdge(source="plan", target="finalize", condition="mode=plan or missing requirements"),
-            GraphEdge(source="dispatch", target="build_infra"),
-            GraphEdge(source="dispatch", target="generate_app"),
-            GraphEdge(source="build_infra", target="finalize"),
-            GraphEdge(source="generate_app", target="finalize"),
-            GraphEdge(source="finalize", target="END"),
-        ]
-        mermaid = "\n".join(
-            [
-                "graph TD",
-                "    START([Start]) --> plan[Plan Request]",
-                "    plan -->|mode=run and complete| dispatch{Dispatch Agents}",
-                "    plan -->|mode=plan or blocked| finalize[Finalize Result]",
-                "    dispatch --> build_infra[Build Infra]",
-                "    dispatch --> generate_app[Generate App]",
-                "    build_infra --> finalize",
-                "    generate_app --> finalize",
-                "    finalize --> END([End])",
-            ]
-        )
-        return GraphView(nodes=nodes, edges=edges, mermaid=mermaid)
+        return GraphView(nodes=GRAPH_NODES, edges=GRAPH_EDGES, mermaid=GRAPH_MERMAID)
 
     def _missing_info(self, req: UserRequest) -> list[MissingRequirement]:
         missing: list[MissingRequirement] = []
+        app_languages = [language.strip().lower() for language in req.app_tech_stack.language]
 
         if not req.targets:
             missing.append(
@@ -185,8 +190,9 @@ class SupervisorAgent:
                         reason="Kafka is selected as a component, but its version is missing.",
                     )
                 )
-            requires_java = any(component in {"tomcat", "kafka"} for component in req.infra_tech_stack.components) or (
-                req.app_tech_stack.language.strip().lower().startswith("java")
+            requires_java = (
+                    any(component in {"tomcat", "kafka"} for component in req.infra_tech_stack.components)
+                    or any(language.startswith("java") for language in app_languages)
             )
             if requires_java and versions.get("java", "").strip() == "":
                 missing.append(
@@ -292,7 +298,9 @@ class SupervisorAgent:
     def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         commands = [f"install_component --name {component}" for component in request.infra_tech_stack.components]
-        commands.append(f"mkdir -p {request.logging.base_dir} {request.logging.gc_log_dir} {request.logging.app_log_dir}")
+        commands.append(
+            f"mkdir -p {request.logging.base_dir} {request.logging.gc_log_dir} {request.logging.app_log_dir}"
+        )
         execution = AgentExecution(
             agent="infra_build",
             success=True,
@@ -318,11 +326,12 @@ class SupervisorAgent:
 
     def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
+        languages = ",".join(request.app_tech_stack.language) or "none"
         execution = AgentExecution(
             agent="sample_app",
             success=True,
             executed_commands=[
-                f"scaffold_app --framework {request.app_tech_stack.framework} --language {request.app_tech_stack.language}",
+                f"scaffold_app --framework {request.app_tech_stack.framework} --language {languages}",
                 "build_artifact --type service",
             ],
             notes=[

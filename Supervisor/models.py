@@ -16,6 +16,7 @@ class InfraTechStack(BaseModel):
     os: str = "linux"
     components: List[str] = Field(default_factory=list)
     versions: dict[str, str] = Field(default_factory=dict)
+    instances: dict[str, int] = Field(default_factory=dict)
 
 
 class LoadProfile(BaseModel):
@@ -45,7 +46,7 @@ class LoggingConfig(BaseModel):
 class AppTechStack(BaseModel):
     framework: str = "FastAPI"
     minor_version: str = "latest"
-    language: str = "Python3.12"
+    language: List[str] = Field(default_factory=lambda: ["Python3.12"])
     databases: str = ""
     db_user: str = ""
     db_pw: str = ""
