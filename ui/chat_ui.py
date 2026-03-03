@@ -34,6 +34,28 @@ def init_messages() -> None:
         ]
 
 
+def init_form_state() -> None:
+    defaults: dict[str, object] = {
+        "components": [],
+        "apache_version": "None",
+        "apache_instance": 0,
+        "tomcat_version": "None",
+        "tomcat_instance": 0,
+        "kafka_version": "None",
+        "kafka_consumer_instance": 0,
+        "pinpoint_version": "None",
+        "pinpoint_agent_instance": 0,
+        "framework": "None",
+        "framework_version": "None",
+        "application_instance": 0,
+        "language": [],
+    }
+
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
 def render_sidebar() -> str:
     with st.sidebar:
         st.subheader("연결 설정")
@@ -113,27 +135,23 @@ def render_form() -> tuple[bool, dict[str, object]]:
         apache_version = st.selectbox(
             "Apache 버전",
             COMPONENT_VERSION_OPTIONS["apache"],
-            index=0,
             key="apache_version",
         )
-        apache_instance = st.number_input("Apache 인스턴스 수", min_value=0, value=0, step=1, key="apache_instance")
+        apache_instance = st.number_input("Apache 인스턴스 수", min_value=0, step=1, key="apache_instance")
         tomcat_version = st.selectbox(
             "Tomcat 버전",
             COMPONENT_VERSION_OPTIONS["tomcat"],
-            index=0,
             key="tomcat_version",
         )
-        tomcat_instance = st.number_input("Tomcat 인스턴스 수", min_value=0, value=0, step=1, key="tomcat_instance")
+        tomcat_instance = st.number_input("Tomcat 인스턴스 수", min_value=0, step=1, key="tomcat_instance")
         kafka_version = st.selectbox(
             "Kafka 버전",
             COMPONENT_VERSION_OPTIONS["kafka"],
-            index=0,
             key="kafka_version",
         )
         kafka_consumer_instance = st.number_input(
             "Kafka Consumer 수",
             min_value=0,
-            value=0,
             step=1,
             key="kafka_consumer_instance",
         )
@@ -145,7 +163,6 @@ def render_form() -> tuple[bool, dict[str, object]]:
         pinpoint_agent_instance = st.number_input(
             "Pinpoint Agent 수 (애플리케이션 인스턴스 수와 동일)",
             min_value=0,
-            value=0,
             step=1,
             key="pinpoint_agent_instance",
         )
@@ -156,20 +173,17 @@ def render_form() -> tuple[bool, dict[str, object]]:
         framework = st.selectbox(
             "백엔드 프레임워크",
             FRAMEWORK_OPTIONS,
-            index=0,
             key="framework",
             on_change=apply_framework_defaults,
         )
         framework_version = st.selectbox(
             "프레임워크 세부 버전",
             FRAMEWORK_VERSION_OPTIONS,
-            index=0,
             key="framework_version",
         )
         application_instance = st.number_input(
             "애플리케이션 인스턴스 수",
             min_value=0,
-            value=0,
             step=1,
             key="application_instance",
         )
@@ -205,7 +219,7 @@ def render_form() -> tuple[bool, dict[str, object]]:
         height=140,
     )
 
-    submit = st.button("Supervisor 요청 전송")
+    submit = st.button("테스트 환경 구축")
 
     return submit, {
         "os": os_name,
@@ -243,6 +257,24 @@ def render_form() -> tuple[bool, dict[str, object]]:
     }
 
 
+def describe_plan_step(step: dict[str, object]) -> str:
+    name = str(step.get("name", "")).strip()
+    status = str(step.get("status", "")).strip()
+    detail = str(step.get("detail", "")).strip()
+
+    if name == "plan":
+        return "입력된 요구사항과 대상 환경 정보를 검토하고, 실제 작업을 시작할 수 있는 상태인지 먼저 확인합니다."
+    if name == "build_infra":
+        if status == "failed":
+            return "필수 정보가 부족해 인프라 설치 및 환경 구성 작업은 아직 시작할 수 없습니다."
+        return "대상 서버에 필요한 인프라 구성요소를 설치하고, 로그 경로와 기본 실행 환경을 준비합니다."
+    if name == "generate_app":
+        if status == "failed":
+            return "필수 정보가 부족해 샘플 애플리케이션 생성 및 배포 준비 작업은 아직 시작할 수 없습니다."
+        return "요청한 프레임워크와 언어 기준으로 샘플 애플리케이션을 만들고, 배포 가능한 산출물을 준비합니다."
+    return detail
+
+
 def render_plan_section(plan_data: dict[str, object] | None, plan_error: str | None) -> None:
     st.subheader("Agent 호출 Plan 점검")
     if plan_error:
@@ -257,14 +289,13 @@ def render_plan_section(plan_data: dict[str, object] | None, plan_error: str | N
         st.warning("아래 필수 항목이 채워지기 전까지 실행이 차단됩니다.")
         for index, item in enumerate(missing_requirements, start=1):
             st.markdown(f"**질문 {index}.** {item['question']}")
-            st.caption(f"필드: `{item['field']}`")
             st.caption(item["reason"])
     else:
         st.success("필수 항목이 모두 채워졌습니다. 실행할 수 있습니다.")
 
     with st.expander("예상 Workflow", expanded=not bool(missing_requirements)):
         for step in plan_data.get("steps", []):
-            st.markdown(f"- `{step['name']}` [{step['status']}] {step['detail']}")
+            st.markdown(f"- {describe_plan_step(step)}")
 
     graph = plan_data.get("graph", {})
     mermaid = graph.get("mermaid", "")
@@ -315,6 +346,7 @@ st.title("테스트 환경 자동 구성 Agent")
 st.caption("인프라 테스트 환경 & 샘플 애플리케이션 자동 개발 Agent.")
 
 init_messages()
+init_form_state()
 api_url = render_sidebar()
 submitted, form_values = render_form()
 sanitized_form_values, notices, validation_errors = apply_form_rules(form_values)

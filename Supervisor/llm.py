@@ -82,7 +82,7 @@ class SupervisorLLM:
             "Respond in Korean.\n"
             "Write a single planning summary sentence in natural language.\n"
             "Do not mention internal node names or implementation labels.\n"
-            f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
+            f"Infra components: {", ".join(request.infra_tech_stack.components) or 'none'}\n"
             f"App framework: {request.app_tech_stack.framework}\n"
             f"Languages: {languages}\n"
             f"Targets: {self._target_summary(request)}\n"
@@ -127,9 +127,9 @@ class SupervisorLLM:
             "Under the section '수행할 작업 설명', describe the work in natural language instead of internal agent names or plan node names.\n"
             "If required fields are missing, say execution is blocked and ask for the missing answers.\n"
             "If the request is complete, explain what will be done first, next, and why.\n"
-            f"Infra components: {', '.join(request.infra_tech_stack.components) or 'none'}\n"
+            f"Infra components: {", ".join(request.infra_tech_stack.components) or 'none'}\n"
             f"App framework: {request.app_tech_stack.framework or 'none'}\n"
-            f"Languages: {', '.join(request.app_tech_stack.language) or 'none'}\n"
+            f"Languages: {", ".join(request.app_tech_stack.language) or 'none'}\n"
             f"Targets: {self._target_summary(request)}\n"
             f"Additional request: {request.additional_request or 'none'}\n"
             f"Plan summary: {plan.summary}\n"
@@ -150,9 +150,9 @@ class SupervisorLLM:
     def _fallback_reply(self, request: UserRequest, plan: BuildPlan) -> str:
         lines = [
             "요청 내용",
-            f"- 인프라 기술스택: {', '.join(request.infra_tech_stack.components) or '없음'}",
+            f"- 인프라 기술스택: {", ".join(request.infra_tech_stack.components) or '없음'}",
             f"- 애플리케이션 프레임워크: {request.app_tech_stack.framework or '없음'}",
-            f"- 언어: {', '.join(request.app_tech_stack.language) or '없음'}",
+            f"- 언어: {", ".join(request.app_tech_stack.language) or '없음'}",
             f"- 대상 서버: {self._target_summary(request)}",
         ]
 
