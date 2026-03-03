@@ -40,7 +40,7 @@ def sanitize_component_fields(form_values: dict[str, object]) -> tuple[dict[str,
         if component not in selected and (current_version != none_value or current_instance != 0):
             sanitized[version_key] = none_value
             sanitized[instance_key] = 0
-            notices.append(f"{component}은(는) 선택되지 않아 요청 payload에서 버전과 인스턴스 수를 초기화했습니다.")
+            notices.append(f"선택하지 않은 {component} 에 대한 버전과 인스턴스 수 요청은 무시됩니다.")
 
     return sanitized, notices
 
@@ -304,6 +304,7 @@ st.code(json.dumps(request_payload, indent=2), language="json")
 st.subheader("플래너 점검")
 for notice in reset_notices:
     st.info(notice)
+    st.toast(notice)
 
 for error in validation_errors:
     st.error(error)
@@ -338,6 +339,8 @@ action_col, preview_col = st.columns([1, 1])
 with action_col:
     if submitted:
         if validation_errors:
+            for error in validation_errors:
+                st.toast(error)
             st.toast("선택한 기술 스택의 버전과 인스턴스 수를 먼저 수정하세요.")
         else:
             submit_chat(api_url, request_payload)
@@ -366,4 +369,3 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
 
 st.divider()
-st.caption("이 페이지는 AGENT.md 기반의 구조화 입력과 자유 형식 요청을 함께 처리합니다.")
