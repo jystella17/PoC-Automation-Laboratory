@@ -15,7 +15,7 @@ def health_check(api_url: str) -> dict[str, object]:
 
 def fetch_plan(api_url: str, payload: dict[str, object]) -> tuple[dict[str, object] | None, str | None]:
     try:
-        response = requests.post(f"{api_url}/v1/supervisor/plan", json=payload, timeout=30)
+        response = requests.post(f"{api_url}/v1/supervisor/plan", json=payload, timeout=600)
         response.raise_for_status()
         return response.json(), None
     except Exception as exc:
@@ -32,7 +32,7 @@ def request_chat_reply(
     response = requests.post(
         f"{api_url}/v1/chat",
         json={"messages": request_messages},
-        timeout=60,
+        timeout=300,
     )
     response.raise_for_status()
     return response.json().get("reply", "Empty response")

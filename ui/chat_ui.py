@@ -55,6 +55,13 @@ def init_form_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
+    if "plan_cache_key" not in st.session_state:
+        st.session_state.plan_cache_key = ""
+    if "plan_cache_data" not in st.session_state:
+        st.session_state.plan_cache_data = None
+    if "plan_cache_error" not in st.session_state:
+        st.session_state.plan_cache_error = None
+
 
 def render_sidebar() -> str:
     with st.sidebar:
@@ -118,7 +125,7 @@ def apply_framework_defaults() -> None:
     st.session_state["application_instance"] = 1
 
 
-def render_form() -> tuple[bool, dict[str, object]]:
+def render_form() -> tuple[bool, bool, dict[str, object]]:
     st.subheader("기본 서비스 스펙")
 
     infra_col, app_col = st.columns(2)
@@ -219,9 +226,10 @@ def render_form() -> tuple[bool, dict[str, object]]:
         height=140,
     )
 
+    plan_check = st.button("Plan 점검")
     submit = st.button("테스트 환경 구축")
 
-    return submit, {
+    return plan_check, submit, {
         "os": os_name,
         "target_os_type": target_os_type,
         "components": st.session_state.get("components", components),
@@ -334,6 +342,35 @@ def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
     st.rerun()
 
 
+def payload_cache_key(api_url: str, payload: dict[str, object]) -> str:
+    return f"{api_url}::{json.dumps(payload, sort_keys=True, ensure_ascii=False)}"
+
+
+def resolve_plan_data(
+    plan_check: bool,
+    submit: bool,
+    api_url: str,
+    payload: dict[str, object],
+    validation_errors: list[str],
+) -> tuple[dict[str, object] | None, str | None]:
+    cache_key = payload_cache_key(api_url, payload)
+    should_fetch = (plan_check or submit) and not validation_errors
+
+    if should_fetch and st.session_state.plan_cache_key != cache_key:
+        plan_data, plan_error = fetch_plan(api_url, payload)
+        st.session_state.plan_cache_key = cache_key
+        st.session_state.plan_cache_data = plan_data
+        st.session_state.plan_cache_error = plan_error
+    elif should_fetch and st.session_state.plan_cache_key == cache_key:
+        plan_data = st.session_state.plan_cache_data
+        plan_error = st.session_state.plan_cache_error
+    else:
+        plan_data = st.session_state.plan_cache_data if st.session_state.plan_cache_key == cache_key else None
+        plan_error = st.session_state.plan_cache_error if st.session_state.plan_cache_key == cache_key else None
+
+    return plan_data, plan_error
+
+
 def render_messages() -> None:
     st.subheader("대화 내역")
     for msg in st.session_state.messages:
@@ -348,13 +385,17 @@ st.caption("인프라 테스트 환경 & 샘플 애플리케이션 자동 개발
 init_messages()
 init_form_state()
 api_url = render_sidebar()
-submitted, form_values = render_form()
+plan_checked, submitted, form_values = render_form()
 sanitized_form_values, notices, validation_errors = apply_form_rules(form_values)
 request_payload = build_user_request(sanitized_form_values)
 
-plan_data, plan_error = (None, None)
-if not validation_errors:
-    plan_data, plan_error = fetch_plan(api_url, request_payload)
+plan_data, plan_error = resolve_plan_data(
+    plan_check=plan_checked,
+    submit=submitted,
+    api_url=api_url,
+    payload=request_payload,
+    validation_errors=validation_errors,
+)
 
 st.subheader("테스트 환경 Spec")
 st.code(json.dumps(request_payload, indent=2), language="json")
