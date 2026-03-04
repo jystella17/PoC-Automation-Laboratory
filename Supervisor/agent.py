@@ -6,6 +6,9 @@ from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from SampleAppGen import SampleAppAgent
+from agent_logging import get_agent_logger, log_event, timed_step
+
 from .config import SupervisorSettings, load_settings
 from .llm import SupervisorLLM
 from .models import (
@@ -19,6 +22,8 @@ from .models import (
     SupervisorRunResult,
     UserRequest,
 )
+
+logger = get_agent_logger("supervisor.agent", "supervisor.log")
 
 
 class SupervisorState(TypedDict, total=False):
@@ -61,8 +66,7 @@ GRAPH_EDGES = [
     GraphEdge(source="plan", target="dispatch", condition="mode=run and no missing requirements"),
     GraphEdge(source="plan", target="finalize", condition="mode=plan or missing requirements"),
     GraphEdge(source="dispatch", target="build_infra"),
-    GraphEdge(source="dispatch", target="generate_app"),
-    GraphEdge(source="build_infra", target="finalize"),
+    GraphEdge(source="build_infra", target="generate_app"),
     GraphEdge(source="generate_app", target="finalize"),
     GraphEdge(source="finalize", target="END"),
 ]
@@ -74,8 +78,7 @@ GRAPH_MERMAID = "\n".join(
         "    plan -->|mode=run and complete| dispatch{Dispatch Agents}",
         "    plan -->|mode=plan or blocked| finalize[Finalize Result]",
         "    dispatch --> build_infra[Build Infra]",
-        "    dispatch --> generate_app[Generate App]",
-        "    build_infra --> finalize",
+        "    build_infra --> generate_app[Generate App]",
         "    generate_app --> finalize",
         "    finalize --> END([End])",
     ]
@@ -86,6 +89,7 @@ class SupervisorAgent:
     def __init__(self, settings: SupervisorSettings | None = None):
         self.settings = settings or load_settings()
         self.llm = SupervisorLLM(self.settings.azure_openai)
+        self.sample_app_agent = SampleAppAgent(settings=self.settings.azure_openai)
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -106,8 +110,7 @@ class SupervisorAgent:
             },
         )
         workflow.add_edge("dispatch", "build_infra")
-        workflow.add_edge("dispatch", "generate_app")
-        workflow.add_edge("build_infra", "finalize")
+        workflow.add_edge("build_infra", "generate_app")
         workflow.add_edge("generate_app", "finalize")
         workflow.add_edge("finalize", END)
         return workflow.compile()
@@ -273,97 +276,10 @@ class SupervisorAgent:
             "execution_path": [],
         }
 
-    def _plan_node(self, state: SupervisorState) -> SupervisorState:
-        request = state["request"]
-        missing_requirements = self._missing_info(request)
-        blocked = bool(missing_requirements)
-        summary = self.llm.summarize_plan(request, missing_requirements)
-        return {
-            "blocked": blocked,
-            "missing_requirements": missing_requirements,
-            "summary": summary,
-            "environment_summary": self._environment_summary(request),
-            "steps": self._build_plan_steps(blocked),
-            "execution_path": ["plan"],
-        }
+    def _invoke(self, req: UserRequest, mode: Literal["plan", "run"]) -> SupervisorState:
+        return self.graph.invoke(self._initial_state(req, mode=mode))
 
-    def _route_after_plan(self, state: SupervisorState) -> str:
-        if state["mode"] == "plan" or state["blocked"]:
-            return "finalize"
-        return "dispatch"
-
-    def _dispatch_node(self, _state: SupervisorState) -> SupervisorState:
-        return {"execution_path": ["dispatch"]}
-
-    def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
-        request = state["request"]
-        commands = [f"install_component --name {component}" for component in request.infra_tech_stack.components]
-        commands.append(
-            f"mkdir -p {request.logging.base_dir} {request.logging.gc_log_dir} {request.logging.app_log_dir}"
-        )
-        execution = AgentExecution(
-            agent="infra_build",
-            success=True,
-            executed_commands=commands,
-            notes=[
-                "sudo usage follows constraints.sudo_allowed.",
-                "Production targets are blocked by default policy.",
-            ],
-        )
-        return {
-            "executed": [execution],
-            "generated_outputs": ["infra bootstrap script"],
-            "recommended_config": [
-                "Store GC logs and app logs in separate directories.",
-                "Validate sudo scope before remote execution.",
-            ],
-            "rollback_cleanup": [
-                "stop services: app/tomcat/kafka",
-                "restore changed config backups",
-            ],
-            "execution_path": ["build_infra"],
-        }
-
-    def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
-        request = state["request"]
-        languages = ",".join(request.app_tech_stack.language) or "none"
-        execution = AgentExecution(
-            agent="sample_app",
-            success=True,
-            executed_commands=[
-                f"scaffold_app --framework {request.app_tech_stack.framework} --language {languages}",
-                "build_artifact --type service",
-            ],
-            notes=[
-                "Include API endpoints and memory leak/OOM simulation options in generated app.",
-                "Mask DB credentials in logs and reports.",
-            ],
-        )
-        return {
-            "executed": [execution],
-            "generated_outputs": ["sample app source", "runbook"],
-            "recommended_config": [
-                "JAVA_OPTS: -Xms2g -Xmx2g -XX:+UseG1GC",
-                "Tune Kafka partitions and replication by target TPS.",
-            ],
-            "rollback_cleanup": ["remove generated artifacts and temp files"],
-            "execution_path": ["generate_app"],
-        }
-
-    def _finalize_node(self, state: SupervisorState) -> SupervisorState:
-        if state["blocked"]:
-            final_summary = "필수 입력값이 아직 부족해 계획 검토 단계에서 작업이 보류되었습니다."
-        elif state["mode"] == "plan":
-            final_summary = "실행 전 검토가 완료되었으며, 필요한 작업 순서를 기준으로 바로 진행할 수 있습니다."
-        else:
-            final_summary = "인프라 준비와 애플리케이션 생성 작업까지 전체 실행 흐름을 완료했습니다."
-        return {
-            "final_summary": final_summary,
-            "execution_path": ["finalize"],
-        }
-
-    def plan(self, req: UserRequest) -> BuildPlan:
-        state = self.graph.invoke(self._initial_state(req, mode="plan"))
+    def _build_plan_from_state(self, state: SupervisorState) -> BuildPlan:
         missing_requirements = state.get("missing_requirements", [])
         return BuildPlan(
             summary=state.get("summary", ""),
@@ -373,24 +289,7 @@ class SupervisorAgent:
             graph=self.graph_view(),
         )
 
-    def chat_reply(self, req: UserRequest) -> tuple[str, BuildPlan]:
-        plan = self.plan(req)
-        reply = self.llm.generate_supervisor_reply(req, plan)
-        print(plan, reply)
-        return reply, plan
-
-    def run(self, req: UserRequest) -> SupervisorRunResult:
-        state = self.graph.invoke(self._initial_state(req, mode="run"))
-        missing_requirements = state.get("missing_requirements", [])
-        if missing_requirements:
-            raise MissingInfoError(
-                missing_fields=[item.field for item in missing_requirements],
-                missing_requirements=missing_requirements,
-            )
-
-        print(self.graph_view())
-        print(state.get("final_summary", ""))
-
+    def _build_run_result_from_state(self, state: SupervisorState) -> SupervisorRunResult:
         return SupervisorRunResult(
             environment_summary=state.get("environment_summary", {}),
             executed=state.get("executed", []),
@@ -401,3 +300,148 @@ class SupervisorAgent:
             execution_path=state.get("execution_path", []),
             final_summary=state.get("final_summary", ""),
         )
+
+    def _plan_node(self, state: SupervisorState) -> SupervisorState:
+        request = state["request"]
+        with timed_step(logger, "supervisor.plan_node", mode=state.get("mode", "unknown")):
+            missing_requirements = self._missing_info(request)
+            blocked = bool(missing_requirements)
+            summary = self.llm.summarize_plan(request, missing_requirements)
+            return {
+                "blocked": blocked,
+                "missing_requirements": missing_requirements,
+                "summary": summary,
+                "environment_summary": self._environment_summary(request),
+                "steps": self._build_plan_steps(blocked),
+                "execution_path": ["plan"],
+            }
+
+    def _route_after_plan(self, state: SupervisorState) -> str:
+        if state["mode"] == "plan" or state["blocked"]:
+            return "finalize"
+        return "dispatch"
+
+    def _dispatch_node(self, _state: SupervisorState) -> SupervisorState:
+        with timed_step(logger, "supervisor.dispatch_node"):
+            return {"execution_path": ["dispatch"]}
+
+    def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
+        request = state["request"]
+        with timed_step(logger, "supervisor.build_infra_node", components=request.infra_tech_stack.components):
+            commands = [f"install_component --name {component}" for component in request.infra_tech_stack.components]
+            commands.append(
+                f"mkdir -p {request.logging.base_dir} {request.logging.gc_log_dir} {request.logging.app_log_dir}"
+            )
+            execution = AgentExecution(
+                agent="infra_build",
+                success=True,
+                executed_commands=commands,
+                notes=[
+                    "sudo usage follows constraints.sudo_allowed.",
+                    "Production targets are blocked by default policy.",
+                ],
+            )
+            return {
+                "executed": [execution],
+                "generated_outputs": ["infra bootstrap script"],
+                "recommended_config": [
+                    "Store GC logs and app logs in separate directories.",
+                    "Validate sudo scope before remote execution.",
+                ],
+                "rollback_cleanup": [
+                    "stop services: app/tomcat/kafka",
+                    "restore changed config backups",
+                ],
+                "execution_path": ["build_infra"],
+            }
+
+    def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
+        request = state["request"]
+        with timed_step(logger, "supervisor.generate_app_node", framework=request.app_tech_stack.framework):
+            result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
+            log_event(
+                logger,
+                "supervisor.generate_app_node.result",
+                success=result.execution.success,
+                executed_commands=result.execution.executed_commands,
+                notes=result.execution.notes,
+                generated_outputs=result.generated_outputs,
+            )
+            return {
+                "executed": [result.execution],
+                "generated_outputs": result.generated_outputs,
+                "recommended_config": result.recommended_config,
+                "rollback_cleanup": result.rollback_cleanup,
+                "execution_path": ["generate_app"],
+            }
+
+    def _finalize_node(self, state: SupervisorState) -> SupervisorState:
+        with timed_step(logger, "supervisor.finalize_node", mode=state.get("mode", "unknown")):
+            if state["blocked"]:
+                final_summary = "필수 입력값이 아직 부족해 계획 검토 단계에서 작업이 보류되었습니다."
+            elif state["mode"] == "plan":
+                final_summary = "실행 전 검토가 완료되었으며, 필요한 작업 순서를 기준으로 바로 진행할 수 있습니다."
+            else:
+                failed_agents = [execution.agent for execution in state.get("executed", []) if not execution.success]
+                if failed_agents:
+                    final_summary = (
+                        "일부 하위 작업이 실패했습니다. "
+                        f"실패한 작업: {', '.join(failed_agents)}."
+                    )
+                else:
+                    final_summary = "인프라 준비와 애플리케이션 생성 작업까지 전체 실행 흐름을 완료했습니다."
+            return {
+                "final_summary": final_summary,
+                "execution_path": ["finalize"],
+            }
+
+    def plan(self, req: UserRequest) -> BuildPlan:
+        with timed_step(logger, "supervisor.plan", framework=req.app_tech_stack.framework):
+            state = self._invoke(req, mode="plan")
+            result = self._build_plan_from_state(state)
+            log_event(
+                logger,
+                "supervisor.plan.result",
+                blocked=bool(result.missing_requirements),
+                missing_fields=result.missing_info,
+            )
+            return result
+
+    def chat_reply(self, req: UserRequest) -> tuple[str, BuildPlan, SupervisorRunResult | None]:
+        with timed_step(logger, "supervisor.chat_reply", framework=req.app_tech_stack.framework):
+            run_result: SupervisorRunResult | None = None
+            if self._missing_info(req):
+                state = self._invoke(req, mode="plan")
+                plan = self._build_plan_from_state(state)
+            else:
+                state = self._invoke(req, mode="run")
+                plan = self._build_plan_from_state(state)
+                run_result = self._build_run_result_from_state(state)
+            reply = self.llm.generate_supervisor_reply(req, plan, run_result)
+            log_event(
+                logger,
+                "supervisor.chat_reply.result",
+                has_run_result=run_result is not None,
+                missing_requirements=len(plan.missing_requirements),
+            )
+            return reply, plan, run_result
+
+    def run(self, req: UserRequest) -> SupervisorRunResult:
+        with timed_step(logger, "supervisor.run", framework=req.app_tech_stack.framework):
+            state = self._invoke(req, mode="run")
+            missing_requirements = state.get("missing_requirements", [])
+            if missing_requirements:
+                raise MissingInfoError(
+                    missing_fields=[item.field for item in missing_requirements],
+                    missing_requirements=missing_requirements,
+                )
+
+            result = self._build_run_result_from_state(state)
+            log_event(
+                logger,
+                "supervisor.run.result",
+                final_summary=result.final_summary,
+                execution_path=result.execution_path,
+                generated_outputs=result.generated_outputs,
+            )
+            return result
