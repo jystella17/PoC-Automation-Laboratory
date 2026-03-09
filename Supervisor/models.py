@@ -9,6 +9,8 @@ class TargetHost(BaseModel):
     host: str
     user: str
     auth_ref: str
+    auth_method: Literal["pem_path", "password", "ssm"] = "pem_path"
+    ssh_port: int = 22
     os_type: str
 
 
@@ -35,6 +37,13 @@ class RequestConstraints(BaseModel):
     no_public_upload: bool = True
     security_policy_notes: List[str] = Field(default_factory=list)
     sudo_allowed: Literal["yes", "no", "limited"] = "limited"
+    network_policy: dict[str, bool] = Field(
+        default_factory=lambda: {
+            "allow_open_port_80": True,
+            "allow_firewall_changes": False,
+        }
+    )
+    apache_config_mode: str = "system_prompt_default"
 
 
 class LoggingConfig(BaseModel):

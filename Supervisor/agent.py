@@ -358,20 +358,27 @@ class SupervisorAgent:
     def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.generate_app_node", framework=request.app_tech_stack.framework):
-            result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
+            # SampleAppGeneration Agent direct invocation is temporarily disabled.
+            # result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
+            # log_event(
+            #     logger,
+            #     "supervisor.generate_app_node.result",
+            #     success=result.execution.success,
+            #     executed_commands=result.execution.executed_commands,
+            #     notes=result.execution.notes,
+            #     generated_outputs=result.generated_outputs,
+            # )
+            result = None
             log_event(
                 logger,
-                "supervisor.generate_app_node.result",
-                success=result.execution.success,
-                executed_commands=result.execution.executed_commands,
-                notes=result.execution.notes,
-                generated_outputs=result.generated_outputs,
+                "supervisor.generate_app_node.skipped",
+                reason="sample_app_agent_disabled",
+                framework=request.app_tech_stack.framework,
             )
             return {
-                "executed": [result.execution],
-                "generated_outputs": result.generated_outputs,
-                "recommended_config": result.recommended_config,
-                "rollback_cleanup": result.rollback_cleanup,
+                "generated_outputs": ["sample app generation skipped by supervisor"],
+                "recommended_config": ["Re-enable SampleAppGeneration Agent after issue triage."],
+                "rollback_cleanup": [],
                 "execution_path": ["generate_app"],
             }
 
