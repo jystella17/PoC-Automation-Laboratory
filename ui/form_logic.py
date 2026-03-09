@@ -5,6 +5,8 @@ from typing import Any
 COMPONENT_OPTIONS = ["Apache", "Tomcat", "Kafka", "Pinpoint", "Others"]
 OS_OPTIONS = ["Linux", "Windows"]
 TARGET_OS_OPTIONS = ["Ubuntu22.04", "Rhel9", "Amazon Linux2023", "Debian12"]
+SSH_AUTH_METHOD_OPTIONS = ["pem_path", "password", "ssm"]
+APACHE_CONFIG_MODE_OPTIONS = ["backup_and_overwrite", "add_vhost_only", "undecided"]
 LANGUAGE_OPTIONS = ["Java21", "Java17", "Python3.12", "Python3.11", "프롬프트로 직접 입력"]
 DATABASE_OPTIONS = ["None", "MySQL", "PostgreSQL", "MariaDB", "Redis", "MongoDB"]
 FRAMEWORK_OPTIONS = ["None", "Spring Boot", "Spring", "FastAPI"]
@@ -150,6 +152,13 @@ def validate_target_fields(form_values: dict[str, Any]) -> list[str]:
         errors.append("대상 호스트를 입력해야 합니다.")
     if not str(form_values["auth_ref"]).strip():
         errors.append("인증 정보를 입력해야 합니다.")
+    if not (1 <= int(form_values["ssh_port"]) <= 65535):
+        errors.append("SSH 포트는 1~65535 범위로 입력해야 합니다.")
+
+    auth_ref = str(form_values["auth_ref"]).strip()
+    auth_method = str(form_values["ssh_auth_method"]).strip()
+    if auth_method == "pem_path" and "/" not in auth_ref and "\\" not in auth_ref:
+        errors.append("pem 인증 방식은 파일명이 아닌 전체 경로 또는 시크릿 참조를 입력해야 합니다.")
     return errors
 
 
@@ -221,12 +230,19 @@ def build_user_request(form_values: dict[str, Any]) -> dict[str, Any]:
             "no_public_upload": form_values["no_public_upload"],
             "security_policy_notes": [],
             "sudo_allowed": form_values["sudo_allowed"],
+            "network_policy": {
+                "allow_open_port_80": form_values["allow_open_port_80"],
+                "allow_firewall_changes": form_values["allow_firewall_changes"],
+            },
+            "apache_config_mode": form_values["apache_config_mode"],
         },
         "targets": [
             {
                 "host": form_values["host"],
                 "user": form_values["target_user"],
                 "auth_ref": form_values["auth_ref"],
+                "auth_method": form_values["ssh_auth_method"],
+                "ssh_port": form_values["ssh_port"],
                 "os_type": form_values["target_os_type"],
             }
         ],

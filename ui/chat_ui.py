@@ -15,6 +15,7 @@ from form_logic import (
     FRAMEWORK_VERSION_OPTIONS,
     LANGUAGE_OPTIONS,
     OS_OPTIONS,
+    SSH_AUTH_METHOD_OPTIONS,
     TARGET_OS_OPTIONS,
     apply_form_rules,
     build_user_request,
@@ -206,7 +207,14 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
     with target_col:
         host = st.text_input("대상 호스트", value="")
         target_user = st.text_input("SSH 사용자", value="ec2-user")
-        auth_ref = st.text_input("인증 정보 (.pem 경로/계정 정보 등)", value="")
+        ssh_port = st.number_input("SSH 포트", min_value=1, max_value=65535, value=22, step=1)
+        ssh_auth_method = st.selectbox("SSH 인증 방식", SSH_AUTH_METHOD_OPTIONS, index=0)
+        auth_ref = st.text_input("인증 정보 (pem 절대경로/시크릿 참조/계정 정보)", value="")
+        allow_firewall_changes = st.checkbox(
+            "방화벽/보안그룹 변경 허용",
+            value=False,
+            help="허용 시 Agent가 SSH를 통해 host 방화벽(ufw/firewalld/iptables) 또는 보안그룹 변경 절차를 수행할 수 있습니다.",
+        )
         base_dir = st.text_input("기본 로그 경로", value="/var/log/infra-test-lab")
         gc_log_dir = st.text_input("GC 로그 경로", value="/var/log/infra-test-lab/gc")
         app_log_dir = st.text_input("애플리케이션 로그 경로", value="/var/log/infra-test-lab/app")
@@ -221,7 +229,7 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
         "추가 요청 사항(자유 입력)",
         placeholder=(
             "예시: Kafka 벤치마크를 먼저 수행하고, Spring Boot 샘플 앱을 배포하며, "
-            "메모리 릭 재현용 엔드포인트도 포함해줘."
+            "메모리 릭 재현용 엔드포인트도 포함해줘. (80 포트 비허용이 필요하면 여기 명시)"
         ),
         height=140,
     )
@@ -253,7 +261,14 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
         "application_instance": int(st.session_state.get("application_instance", application_instance)),
         "host": host,
         "target_user": target_user,
+        "ssh_port": int(ssh_port),
+        "ssh_auth_method": ssh_auth_method,
         "auth_ref": auth_ref,
+        # Default policy: allow HTTP(80) unless user explicitly asks to block in freeform prompt.
+        "allow_open_port_80": True,
+        "allow_firewall_changes": allow_firewall_changes,
+        # Agent/system prompt decides Apache/Tomcat config handling unless user overrides in freeform prompt.
+        "apache_config_mode": "system_prompt_default",
         "base_dir": base_dir,
         "gc_log_dir": gc_log_dir,
         "app_log_dir": app_log_dir,
