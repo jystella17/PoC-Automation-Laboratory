@@ -6,6 +6,7 @@ from typing import Annotated, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from InfraAutoSetting import InfraAutoSettingAgent
 from SampleAppGen import SampleAppAgent
 from agent_logging import get_agent_logger, log_event, timed_step
 
@@ -89,6 +90,7 @@ class SupervisorAgent:
     def __init__(self, settings: SupervisorSettings | None = None):
         self.settings = settings or load_settings()
         self.llm = SupervisorLLM(self.settings.azure_openai)
+        self.infra_agent = InfraAutoSettingAgent(settings=self.settings.azure_openai)
         self.sample_app_agent = SampleAppAgent(settings=self.settings.azure_openai)
         self.graph = self._build_graph()
 
@@ -328,30 +330,21 @@ class SupervisorAgent:
     def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.build_infra_node", components=request.infra_tech_stack.components):
-            commands = [f"install_component --name {component}" for component in request.infra_tech_stack.components]
-            commands.append(
-                f"mkdir -p {request.logging.base_dir} {request.logging.gc_log_dir} {request.logging.app_log_dir}"
-            )
-            execution = AgentExecution(
-                agent="infra_build",
-                success=True,
-                executed_commands=commands,
-                notes=[
-                    "sudo usage follows constraints.sudo_allowed.",
-                    "Production targets are blocked by default policy.",
-                ],
+            result = self.infra_agent.run(request, prior_executions=state.get("executed", []))
+            execution = result.execution
+            log_event(
+                logger,
+                "supervisor.build_infra_node.result",
+                success=execution.success,
+                executed_commands=execution.executed_commands,
+                notes=execution.notes,
+                generated_outputs=result.generated_outputs,
             )
             return {
                 "executed": [execution],
-                "generated_outputs": ["infra bootstrap script"],
-                "recommended_config": [
-                    "Store GC logs and app logs in separate directories.",
-                    "Validate sudo scope before remote execution.",
-                ],
-                "rollback_cleanup": [
-                    "stop services: app/tomcat/kafka",
-                    "restore changed config backups",
-                ],
+                "generated_outputs": result.generated_outputs,
+                "recommended_config": result.recommended_config,
+                "rollback_cleanup": result.rollback_cleanup,
                 "execution_path": ["build_infra"],
             }
 
