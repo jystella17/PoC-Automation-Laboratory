@@ -20,6 +20,7 @@ from form_logic import (
     apply_form_rules,
     build_user_request,
 )
+from Supervisor.models import PlanStep
 
 
 def init_messages() -> None:
@@ -281,21 +282,7 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
 
 
 def describe_plan_step(step: dict[str, object]) -> str:
-    name = str(step.get("name", "")).strip()
-    status = str(step.get("status", "")).strip()
-    detail = str(step.get("detail", "")).strip()
-
-    if name == "plan":
-        return "입력된 요구사항과 대상 환경 정보를 검토하고, 실제 작업을 시작할 수 있는 상태인지 먼저 확인합니다."
-    if name == "build_infra":
-        if status == "failed":
-            return "필수 정보가 부족해 인프라 설치 및 환경 구성 작업은 아직 시작할 수 없습니다."
-        return "대상 서버에 필요한 인프라 구성요소를 설치하고, 로그 경로와 기본 실행 환경을 준비합니다."
-    if name == "generate_app":
-        if status == "failed":
-            return "필수 정보가 부족해 샘플 애플리케이션 생성 및 배포 준비 작업은 아직 시작할 수 없습니다."
-        return "요청한 프레임워크와 언어 기준으로 샘플 애플리케이션을 만들고, 배포 가능한 산출물을 준비합니다."
-    return detail
+    return PlanStep.model_validate(step).describe()
 
 
 def render_plan_section(plan_data: dict[str, object] | None, plan_error: str | None) -> None:
