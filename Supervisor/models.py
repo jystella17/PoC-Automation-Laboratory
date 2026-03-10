@@ -53,9 +53,9 @@ class LoggingConfig(BaseModel):
 
 
 class AppTechStack(BaseModel):
-    framework: str = "FastAPI"
-    minor_version: str = "latest"
-    language: List[str] = Field(default_factory=lambda: ["Python3.12"])
+    framework: str = ""
+    minor_version: str = ""
+    language: List[str] = Field(default_factory=lambda: [""])
     databases: str = ""
     db_user: str = ""
     db_pw: str = ""
