@@ -12,7 +12,8 @@ from typing import Iterator
 def _resolve_log_dir() -> Path:
     if os.getenv("AGENT_LOG_DIR"):
         return Path(os.getenv("AGENT_LOG_DIR", "")).expanduser().resolve()
-    return Path("/tmp/poc-automation-laboratory/logs")
+    import tempfile
+    return Path(tempfile.gettempdir()) / "poc-automation-laboratory" / "logs"
 
 
 LOG_DIR = _resolve_log_dir()
