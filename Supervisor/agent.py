@@ -325,6 +325,19 @@ class SupervisorAgent:
 
     def _dispatch_node(self, _state: SupervisorState) -> SupervisorState:
         with timed_step(logger, "supervisor.dispatch_node"):
+            request = _state["request"]
+            dispatch_plan = []
+            if request.infra_tech_stack.components:
+                dispatch_plan.append("build_infra")
+            if request.app_tech_stack.framework.strip().lower() not in {"", "none"} and request.topology.apps > 0:
+                dispatch_plan.append("generate_app")
+            log_event(
+                logger,
+                "supervisor.dispatch_node.plan",
+                dispatch_targets=dispatch_plan,
+                components=request.infra_tech_stack.components,
+                framework=request.app_tech_stack.framework,
+            )
             return {"execution_path": ["dispatch"]}
 
     def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
@@ -351,27 +364,20 @@ class SupervisorAgent:
     def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.generate_app_node", framework=request.app_tech_stack.framework):
-            # SampleAppGeneration Agent direct invocation is temporarily disabled.
-            # result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
-            # log_event(
-            #     logger,
-            #     "supervisor.generate_app_node.result",
-            #     success=result.execution.success,
-            #     executed_commands=result.execution.executed_commands,
-            #     notes=result.execution.notes,
-            #     generated_outputs=result.generated_outputs,
-            # )
-            result = None
+            result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
             log_event(
                 logger,
-                "supervisor.generate_app_node.skipped",
-                reason="sample_app_agent_disabled",
-                framework=request.app_tech_stack.framework,
+                "supervisor.generate_app_node.result",
+                success=result.execution.success,
+                executed_commands=result.execution.executed_commands,
+                notes=result.execution.notes,
+                generated_outputs=result.generated_outputs,
             )
             return {
-                "generated_outputs": ["sample app generation skipped by supervisor"],
-                "recommended_config": ["Re-enable SampleAppGeneration Agent after issue triage."],
-                "rollback_cleanup": [],
+                "executed": [result.execution],
+                "generated_outputs": result.generated_outputs,
+                "recommended_config": result.recommended_config,
+                "rollback_cleanup": result.rollback_cleanup,
                 "execution_path": ["generate_app"],
             }
 

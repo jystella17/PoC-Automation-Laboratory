@@ -84,6 +84,20 @@ class PlanStep(BaseModel):
     status: Literal["pending", "in_progress", "completed", "failed"] = "pending"
     detail: str
 
+    def describe(self) -> str:
+        """Return a user-facing description of this plan step."""
+        if self.name == "plan":
+            return "입력된 요구사항과 대상 환경 정보를 검토하고, 바로 실행 가능한 상태인지 확인합니다."
+        if self.name == "build_infra":
+            if self.status == "failed":
+                return "필수 정보가 아직 부족해 인프라 설치 및 환경 구성 작업은 시작할 수 없습니다."
+            return "대상 서버에 필요한 인프라 구성요소를 설치하고, 로그 경로와 기본 실행 환경을 준비합니다."
+        if self.name == "generate_app":
+            if self.status == "failed":
+                return "필수 정보가 아직 부족해 샘플 애플리케이션 생성 및 배포 준비 작업은 시작할 수 없습니다."
+            return "요청한 프레임워크와 언어 기준으로 샘플 애플리케이션을 생성하고, 배포 가능한 산출물을 준비합니다."
+        return self.detail
+
 
 class GraphNode(BaseModel):
     node_id: str

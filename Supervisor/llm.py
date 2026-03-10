@@ -3,6 +3,7 @@ from __future__ import annotations
 from .models import AgentExecution, SupervisorRunResult
 from .config import AzureOpenAISettings
 from .models import BuildPlan, MissingRequirement, PlanStep, UserRequest
+from base_llm import BaseLLM
 
 
 SUPERVISOR_SYSTEM_PROMPT = """You are the Supervisor Agent for an infra test automation lab.
@@ -16,23 +17,9 @@ Keep answers concise, structured, practical, and suitable for an engineering han
 """
 
 
-class SupervisorLLM:
+class SupervisorLLM(BaseLLM):
     def __init__(self, settings: AzureOpenAISettings):
-        self.settings = settings
-
-    def _create_llm(self):
-        try:
-            from langchain_openai import AzureChatOpenAI
-        except ImportError:
-            return None
-
-        return AzureChatOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            azure_deployment=self.settings.deployment_name,
-            api_version=self.settings.api_version,
-            temperature=self.settings.temperature,
-        )
+        super().__init__(settings)
 
     def summarize_plan(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
         if self.settings.enabled and self.settings.is_configured:
@@ -59,19 +46,6 @@ class SupervisorLLM:
         if not request.targets:
             return "없음"
         return ", ".join(f"{target.host} ({target.user})" for target in request.targets)
-
-    def _humanize_step(self, step: PlanStep) -> str:
-        if step.name == "plan":
-            return "입력된 요구사항과 대상 환경 정보를 검토하고, 바로 실행 가능한 상태인지 확인합니다."
-        if step.name == "build_infra":
-            if step.status == "failed":
-                return "필수 정보가 아직 부족해 인프라 설치 및 환경 구성 작업은 시작할 수 없습니다."
-            return "대상 서버에 필요한 인프라 구성요소를 설치하고, 로그 경로와 기본 실행 환경을 준비합니다."
-        if step.name == "generate_app":
-            if step.status == "failed":
-                return "필수 정보가 아직 부족해 샘플 애플리케이션 생성 및 배포 준비 작업은 시작할 수 없습니다."
-            return "요청한 프레임워크와 언어 기준으로 샘플 애플리케이션을 생성하고, 배포 가능한 산출물을 준비합니다."
-        return step.detail
 
     def _summarize_with_azure(
         self,
@@ -132,7 +106,7 @@ class SupervisorLLM:
         components = ", ".join(request.infra_tech_stack.components) or "none"
         languages = ", ".join(request.app_tech_stack.language) or "none"
         step_lines = "\n".join(
-            f"{index}. {self._humanize_step(step)}" for index, step in enumerate(plan.steps, start=1)
+            f"{index}. {step.describe()}" for index, step in enumerate(plan.steps, start=1)
         ) or "1. 현재 수행 예정 작업이 정리되지 않았습니다."
         missing_lines = "\n".join(f"- {item.question}" for item in plan.missing_requirements) or "- 없음"
         execution_summary = self._execution_summary(run_result)
@@ -192,7 +166,7 @@ class SupervisorLLM:
         else:
             lines.append("수행할 작업 설명")
             for index, step in enumerate(plan.steps, start=1):
-                lines.append(f"- {index}. {self._humanize_step(step)}")
+                lines.append(f"- {index}. {step.describe()}")
 
         if run_result is not None:
             lines.append("")
