@@ -1,0 +1,63 @@
+{
+  "infra_tech_stack": {
+    "os": "Linux",
+    "components": ["apache", "tomcat"],
+    "versions": {
+      "apache": "2.4.66",
+      "tomcat": "10",
+      "kafka": "None",
+      "pinpoint": "None",
+      "java": "17"
+    },
+    "instances": {
+      "apache": 1,
+      "tomcat": 1,
+      "kafka_consumer": 0,
+      "pinpoint_agent": 0
+    }
+  },
+  "load_profile": {
+    "tps": 2000,
+    "payload_bytes": 1024,
+    "duration_sec": 300,
+    "concurrency": 100
+  },
+  "topology": {
+    "nodes": 1,
+    "apps": 1
+  },
+  "constraints": {
+    "no_public_upload": true,
+    "security_policy_notes": [],
+    "sudo_allowed": "limited",
+    "network_policy": {
+      "allow_open_port_80": true,
+      "allow_firewall_changes": false
+    },
+    "apache_config_mode": "system_prompt_default"
+  },
+  "targets": [
+    {
+      "host": "10.0.0.10",
+      "user": "ec2-user",
+      "auth_ref": "/path/to/key.pem",
+      "auth_method": "pem_path",
+      "ssh_port": 22,
+      "os_type": "Ubuntu22.04"
+    }
+  ],
+  "logging": {
+    "base_dir": "/var/log/infra-test-lab",
+    "gc_log_dir": "/var/log/infra-test-lab/gc",
+    "app_log_dir": "/var/log/infra-test-lab/app"
+  },
+  "app_tech_stack": {
+    "framework": "FastAPI",
+    "minor_version": "FastAPI 0.135.1",
+    "language": ["Python3.12"],
+    "databases": "None",
+    "db_user": "",
+    "db_pw": ""
+  },
+  "additional_request": "기본 테스트 실행. 80 포트는 허용 정책을 따른다."
+}
