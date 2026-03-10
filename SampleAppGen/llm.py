@@ -7,6 +7,7 @@ from pathlib import Path
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
+from base_llm import BaseLLM
 
 from .models import ApplicationFilePlan, ApplicationPlan, ValidationIssue
 
@@ -21,29 +22,9 @@ Return JSON only when asked for JSON. Return raw file contents only when asked f
 logger = get_agent_logger("sample_app_gen.llm", "sample_app_gen.log")
 
 
-class SampleAppGeneratorLLM:
+class SampleAppGeneratorLLM(BaseLLM):
     def __init__(self, settings: AzureOpenAISettings):
-        self.settings = settings
-
-    @property
-    def is_available(self) -> bool:
-        return self.settings.enabled and self.settings.is_configured
-
-    def _create_llm(self):
-        if not self.is_available:
-            return None
-        try:
-            from langchain_openai import AzureChatOpenAI
-        except ImportError:
-            return None
-
-        return AzureChatOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            azure_deployment=self.settings.deployment_name,
-            api_version=self.settings.api_version,
-            temperature=self.settings.temperature,
-        )
+        super().__init__(settings)
 
     def plan_application(
         self,
@@ -94,24 +75,28 @@ class SampleAppGeneratorLLM:
                 log_event(logger, "sample_app_gen.llm.plan_application.empty_payload", app_id=app_id)
                 return None
             data = json.loads(payload)
-            plan = ApplicationPlan(
-                app_id=app_id,
-                framework=data["framework"],
-                framework_version=data["framework_version"],
-                language=data["language"],
-                runtime_version=data.get("runtime_version", ""),
-                artifact_type=data.get("artifact_type", "zip"),
-                artifact_name=data["artifact_name"],
-                image_name=data["image_name"],
-                project_dir=str(project_dir),
-                log_dir=data.get("log_dir", request.logging.app_log_dir),
-                gc_log_dir=data.get("gc_log_dir", request.logging.gc_log_dir),
-                special_scenarios=data.get("special_scenarios", []),
-                deployment_commands=data.get("deployment_commands", []),
-                required_env=data.get("required_env", []),
-                file_plan=[ApplicationFilePlan.model_validate(item) for item in data.get("file_plan", [])],
-                spec_markdown=data.get("spec_markdown", ""),
-            )
+            try:
+                plan = ApplicationPlan(
+                    app_id=app_id,
+                    framework=data["framework"],
+                    framework_version=data["framework_version"],
+                    language=data["language"],
+                    runtime_version=data.get("runtime_version", ""),
+                    artifact_type=data.get("artifact_type", "zip"),
+                    artifact_name=data["artifact_name"],
+                    image_name=data["image_name"],
+                    project_dir=str(project_dir),
+                    log_dir=data.get("log_dir", request.logging.app_log_dir),
+                    gc_log_dir=data.get("gc_log_dir", request.logging.gc_log_dir),
+                    special_scenarios=data.get("special_scenarios", []),
+                    deployment_commands=data.get("deployment_commands", []),
+                    required_env=data.get("required_env", []),
+                    file_plan=[ApplicationFilePlan.model_validate(item) for item in data.get("file_plan", [])],
+                    spec_markdown=data.get("spec_markdown", ""),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                log_event(logger, "sample_app_gen.llm.plan_application.validation_error", app_id=app_id, error=str(exc))
+                return None
             log_event(logger, "sample_app_gen.llm.plan_application.result", app_id=app_id, file_count=len(plan.file_plan))
             return plan
 
@@ -194,11 +179,6 @@ class SampleAppGeneratorLLM:
             return match.group(1)
         match = re.search(r"(\{.*\})", stripped, re.DOTALL)
         return match.group(1) if match else ""
-
-    def _strip_code_fences(self, text: str) -> str:
-        stripped = text.strip()
-        match = re.match(r"```[a-zA-Z0-9_-]*\n(.*)\n```$", stripped, re.DOTALL)
-        return match.group(1) if match else stripped
 
     def _project_context(self, existing_files: dict[str, str]) -> str:
         if not existing_files:
