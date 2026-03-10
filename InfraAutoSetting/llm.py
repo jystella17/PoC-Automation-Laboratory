@@ -6,6 +6,7 @@ import re
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
+from base_llm import BaseLLM
 
 SYSTEM_PROMPT = """You are a senior infrastructure automation engineer.
 Generate safe, idempotent Linux shell scripts for infra setup based on the request.
@@ -32,29 +33,9 @@ Apache/Tomcat config policy:
 logger = get_agent_logger("infra_auto_setting.llm", "infra_auto_setting.log")
 
 
-class InfraScriptGeneratorLLM:
+class InfraScriptGeneratorLLM(BaseLLM):
     def __init__(self, settings: AzureOpenAISettings):
-        self.settings = settings
-
-    @property
-    def is_available(self) -> bool:
-        return self.settings.enabled and self.settings.is_configured
-
-    def _create_llm(self):
-        if not self.is_available:
-            return None
-        try:
-            from langchain_openai import AzureChatOpenAI
-        except ImportError:
-            return None
-
-        return AzureChatOpenAI(
-            azure_endpoint=self.settings.endpoint,
-            api_key=self.settings.api_key,
-            azure_deployment=self.settings.deployment_name,
-            api_version=self.settings.api_version,
-            temperature=self.settings.temperature,
-        )
+        super().__init__(settings)
 
     def generate_install_script(
         self,
@@ -114,11 +95,6 @@ class InfraScriptGeneratorLLM:
                 length=len(script),
             )
             return script if script.endswith("\n") else script + "\n"
-
-    def _strip_code_fences(self, text: str) -> str:
-        stripped = text.strip()
-        match = re.match(r"```[a-zA-Z0-9_-]*\n(.*)\n```$", stripped, re.DOTALL)
-        return match.group(1) if match else stripped
 
     def _basic_guard(self, script: str) -> bool:
         if "#!/usr/bin/env bash" not in script:
