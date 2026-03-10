@@ -5,3 +5,4 @@
 ./SampleAppGen/.idea
 ./application-properties.env
 ./config/supervisor_settings.json
+./config/settings.json
