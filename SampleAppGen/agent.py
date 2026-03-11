@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import operator
 import re
 import shutil
@@ -25,6 +24,7 @@ from .models import (
     SampleAppRunResult,
     ValidationIssue,
 )
+from .tools import SampleAppTools
 
 logger = get_agent_logger("sample_app_gen.agent", "sample_app_gen.log")
 
@@ -60,6 +60,7 @@ class SampleAppAgent:
         self.workspace_root = base_dir / "generated_apps"
         self.max_repairs = max_repairs
         self.llm = SampleAppGeneratorLLM(settings or AzureOpenAISettings())
+        self.tools = SampleAppTools()
         self.graph = self._build_graph()
 
     def _build_graph(self):
@@ -219,7 +220,7 @@ class SampleAppAgent:
             generated_files: list[GeneratedFile] = []
 
             spec_path = project_dir / "APPLICATION_SPEC.md"
-            spec_path.write_text(plan.spec_markdown, encoding="utf-8")
+            self.tools.call("execution_file_write", path=spec_path, content=plan.spec_markdown, overwrite=True)
             existing_files["APPLICATION_SPEC.md"] = plan.spec_markdown
             generated_files.append(GeneratedFile(path=str(spec_path), description="Generated application specification"))
 
@@ -230,8 +231,7 @@ class SampleAppAgent:
                         content = self._fallback_file_content(request, plan, file_plan)
                         log_event(logger, "sample_app_gen.generate_file_step.fallback", path=file_plan.path)
                     path = project_dir / file_plan.path
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(content, encoding="utf-8")
+                    self.tools.call("execution_file_write", path=path, content=content, overwrite=True)
                     existing_files[file_plan.path] = content
                     generated_files.append(GeneratedFile(path=str(path), description=file_plan.purpose))
 
@@ -248,31 +248,14 @@ class SampleAppAgent:
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.validate_files_node", app_id=plan.app_id):
             project_dir = Path(plan.project_dir)
-            issues: list[ValidationIssue] = []
-
-            for file_plan in plan.file_plan:
-                path = project_dir / file_plan.path
-                if not path.exists():
-                    issues.append(ValidationIssue(path=file_plan.path, message="Expected file is missing."))
-
-            for relative_path, content in state.get("existing_files", {}).items():
-                if relative_path.endswith(".py"):
-                    try:
-                        ast.parse(content)
-                    except SyntaxError as exc:
-                        issues.append(ValidationIssue(path=relative_path, message=f"Python syntax error: {exc.msg}"))
-
-            if plan.framework.lower() == "fastapi":
-                if "app/main.py" not in state.get("existing_files", {}):
-                    issues.append(ValidationIssue(path="app/main.py", message="FastAPI entrypoint is required."))
-            elif plan.framework.lower() in {"spring", "spring boot"}:
-                required = {
-                    "pom.xml": "Maven build descriptor is required.",
-                    "src/main/java/com/example/sampleapp/SampleAppApplication.java": "Spring boot entrypoint is required.",
-                }
-                for file_path, message in required.items():
-                    if file_path not in state.get("existing_files", {}):
-                        issues.append(ValidationIssue(path=file_path, message=message))
+            validation = self.tools.call(
+                "code_validator",
+                project_dir=project_dir,
+                expected_files=[item.path for item in plan.file_plan],
+                existing_files=state.get("existing_files", {}),
+                framework=plan.framework,
+            )
+            issues: list[ValidationIssue] = validation["issues"]
 
             log_event(logger, "sample_app_gen.validate_files_node.result", issue_count=len(issues))
             return {
@@ -317,8 +300,7 @@ class SampleAppAgent:
                         repaired = self._fallback_file_content(request, plan, file_plan)
                         log_event(logger, "sample_app_gen.repair_file_step.fallback", path=file_plan.path)
                     path = project_dir / file_plan.path
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(repaired, encoding="utf-8")
+                    self.tools.call("execution_file_write", path=path, content=repaired, overwrite=True)
                     existing_files[file_plan.path] = repaired
 
             return {
@@ -332,9 +314,10 @@ class SampleAppAgent:
         with timed_step(logger, "sample_app_gen.package_artifacts_node", app_id=plan.app_id):
             project_dir = Path(plan.project_dir)
             dist_dir = self.workspace_root / "artifacts"
-            dist_dir.mkdir(parents=True, exist_ok=True)
             archive_base = dist_dir / plan.app_id
-            archive_path = shutil.make_archive(str(archive_base), "zip", root_dir=project_dir)
+            build = self.tools.call("build_code", project_dir=project_dir, output_base=archive_base)
+            archive_path = build["output_path"]
+            docker = self.tools.call("docker_build", image_name=plan.image_name, tag="latest")
 
             recommended = [f"APP_LOG_DIR={plan.log_dir}", *plan.required_env]
             if plan.language.lower().startswith("java") and plan.gc_log_dir:
@@ -353,7 +336,7 @@ class SampleAppAgent:
             return {
                 "executed_commands": [
                     f"build_code --path {project_dir} --output {archive_path}",
-                    f"docker_build --target {plan.image_name} --tag latest",
+                    f"docker_build --target {docker['image_name']} --tag {docker['tag']}",
                 ],
                 "generated_outputs": [
                     "배포 가이드라인 및 API 문서",
