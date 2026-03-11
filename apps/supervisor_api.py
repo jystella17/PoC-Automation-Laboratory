@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_logging import get_agent_logger, log_event, timed_step
 from Supervisor import MissingInfoError, SupervisorAgent
@@ -33,6 +33,7 @@ class RunAsyncStatusResponse(BaseModel):
     finished_at: str = ""
     error: str = ""
     result: SupervisorRunResult | None = None
+    events: list[dict[str, object]] = Field(default_factory=list)
 
 
 _run_executor = ThreadPoolExecutor(max_workers=max(1, int(os.getenv("SUPERVISOR_RUN_WORKERS", "2"))))
@@ -45,6 +46,18 @@ def _now_iso() -> str:
 
 
 def _execute_run_job(run_id: str, request: UserRequest) -> None:
+    def _emit(event: dict[str, object]) -> None:
+        with _run_jobs_lock:
+            job = _run_jobs.get(run_id)
+            if not job:
+                return
+            events = job.get("events")
+            if not isinstance(events, list):
+                events = []
+                job["events"] = events
+            events.append(event)
+        print(f"[run:{run_id}] {event['timestamp']} | {event['owner']} | {event['phase']} | {event['status']} | {event['message']}")
+
     with _run_jobs_lock:
         job = _run_jobs.get(run_id)
         if not job:
@@ -53,7 +66,7 @@ def _execute_run_job(run_id: str, request: UserRequest) -> None:
         job["started_at"] = _now_iso()
 
     try:
-        result = agent.run(request)
+        result = agent.run(request, event_callback=_emit)
     except Exception as exc:  # pragma: no cover
         with _run_jobs_lock:
             job = _run_jobs.get(run_id)
@@ -122,6 +135,7 @@ async def run_supervisor_async(request: UserRequest) -> RunAsyncStartResponse:
                 "finished_at": "",
                 "error": "",
                 "result": None,
+                "events": [],
             }
         _run_executor.submit(_execute_run_job, run_id, request)
         log_event(logger, "supervisor_api.run_async.queued", run_id=run_id)
@@ -143,6 +157,7 @@ async def get_run_supervisor_async(run_id: str) -> RunAsyncStatusResponse:
             finished_at=str(job.get("finished_at", "")),
             error=str(job.get("error", "")),
             result=job.get("result"),
+            events=job.get("events", []),
         )
 
 

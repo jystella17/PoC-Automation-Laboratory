@@ -68,6 +68,8 @@ def init_form_state() -> None:
         st.session_state.active_run_status = ""
     if "active_run_notified" not in st.session_state:
         st.session_state.active_run_notified = False
+    if "active_run_events" not in st.session_state:
+        st.session_state.active_run_events = []
 
 
 def render_sidebar() -> str:
@@ -316,28 +318,53 @@ def _format_run_result(run_status: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def poll_active_run(api_url: str) -> None:
+def render_active_run_progress() -> None:
+    run_id = str(st.session_state.get("active_run_id", "")).strip()
+    events = st.session_state.get("active_run_events", [])
+    status = str(st.session_state.get("active_run_status", "")).strip()
+    if not run_id and not events:
+        return
+
+    st.subheader("실행 진행 상황")
+    if run_id:
+        st.caption(f"run_id={run_id}, status={status or 'unknown'}")
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        owner = str(event.get("owner", "unknown")).strip()
+        phase = str(event.get("phase", "")).strip()
+        event_status = str(event.get("status", "")).strip()
+        message = str(event.get("message", "")).strip()
+        timestamp = str(event.get("timestamp", "")).strip()
+        st.markdown(f"- `{timestamp}` [{owner}/{phase}/{event_status}] {message}")
+        details = event.get("details", {})
+        if isinstance(details, dict) and details:
+            st.code(json.dumps(details, ensure_ascii=False, indent=2), language="json")
+
+
+def poll_active_run(api_url: str) -> bool:
     run_id = str(st.session_state.get("active_run_id", "")).strip()
     if not run_id:
-        return
+        return False
 
     try:
         run_status = get_supervisor_run_status(api_url, run_id)
     except Exception as exc:
         st.warning(f"실행 상태 조회 실패(run_id={run_id}): {exc}")
-        return
+        return False
 
     status = str(run_status.get("status", "")).strip()
     st.session_state.active_run_status = status
+    events = run_status.get("events", [])
+    if isinstance(events, list):
+        st.session_state.active_run_events = events
 
     if status in {"queued", "running"}:
         st.info(f"실행 중입니다. run_id={run_id}, status={status}")
-        time.sleep(2)
-        st.rerun()
-        return
+        return True
 
     if st.session_state.active_run_notified:
-        return
+        return False
 
     if status == "succeeded":
         st.session_state.messages.append({"role": "assistant", "content": _format_run_result(run_status)})
@@ -349,7 +376,7 @@ def poll_active_run(api_url: str) -> None:
 
     st.session_state.active_run_notified = True
     st.session_state.active_run_id = ""
-    st.rerun()
+    return False
 
 
 def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
@@ -371,6 +398,7 @@ def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
         st.session_state.active_run_id = run_id
         st.session_state.active_run_status = str(enqueue.get("status", "queued"))
         st.session_state.active_run_notified = False
+        st.session_state.active_run_events = []
         reply = f"실행 요청을 접수했습니다. run_id={run_id}, status={st.session_state.active_run_status}"
     except Exception as exc:
         reply = f"Error: {exc}"
@@ -401,6 +429,10 @@ st.code(json.dumps(request_payload, indent=2), language="json")
 st.write("")
 
 handle_submit(submitted, api_url, request_payload, notices, validation_errors)
-poll_active_run(api_url)
+should_refresh = poll_active_run(api_url)
+render_active_run_progress()
 render_messages()
 st.divider()
+if should_refresh:
+    time.sleep(2)
+    st.rerun()
