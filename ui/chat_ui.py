@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import json
+import time
 
 import streamlit as st
 
-from api_client import DEFAULT_API_URL, fetch_plan, health_check, request_chat_reply
+from api_client import (
+    DEFAULT_API_URL,
+    get_supervisor_run_status,
+    health_check,
+    start_supervisor_run,
+)
 from form_logic import (
     COMPONENT_OPTIONS,
     COMPONENT_RULES,
@@ -20,7 +26,6 @@ from form_logic import (
     apply_form_rules,
     build_user_request,
 )
-from Supervisor.models import PlanStep
 
 
 def init_messages() -> None:
@@ -57,12 +62,12 @@ def init_form_state() -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
-    if "plan_cache_key" not in st.session_state:
-        st.session_state.plan_cache_key = ""
-    if "plan_cache_data" not in st.session_state:
-        st.session_state.plan_cache_data = None
-    if "plan_cache_error" not in st.session_state:
-        st.session_state.plan_cache_error = None
+    if "active_run_id" not in st.session_state:
+        st.session_state.active_run_id = ""
+    if "active_run_status" not in st.session_state:
+        st.session_state.active_run_status = ""
+    if "active_run_notified" not in st.session_state:
+        st.session_state.active_run_notified = False
 
 
 def render_sidebar() -> str:
@@ -127,7 +132,7 @@ def apply_framework_defaults() -> None:
     st.session_state["application_instance"] = 1
 
 
-def render_form() -> tuple[bool, bool, dict[str, object]]:
+def render_form() -> tuple[bool, dict[str, object]]:
     st.subheader("기본 서비스 스펙")
 
     infra_col, app_col = st.columns(2)
@@ -235,10 +240,9 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
         height=140,
     )
 
-    plan_check = st.button("Plan 점검")
     submit = st.button("테스트 환경 구축")
 
-    return plan_check, submit, {
+    return submit, {
         "os": os_name,
         "target_os_type": target_os_type,
         "components": st.session_state.get("components", components),
@@ -281,40 +285,6 @@ def render_form() -> tuple[bool, bool, dict[str, object]]:
     }
 
 
-def describe_plan_step(step: dict[str, object]) -> str:
-    return PlanStep.model_validate(step).describe()
-
-
-def render_plan_section(plan_data: dict[str, object] | None, plan_error: str | None) -> None:
-    st.subheader("Agent 호출 Plan 점검")
-    if plan_error:
-        st.error(f"Plan 점검 실패: {plan_error}")
-        return
-    if plan_data is None:
-        return
-
-    st.write(plan_data.get("summary", ""))
-    missing_requirements = plan_data.get("missing_requirements", [])
-    if missing_requirements:
-        st.warning("아래 필수 항목이 채워지기 전까지 실행이 차단됩니다.")
-        for index, item in enumerate(missing_requirements, start=1):
-            st.markdown(f"**질문 {index}.** {item['question']}")
-            st.caption(item["reason"])
-    else:
-        st.success("필수 항목이 모두 채워졌습니다. 실행할 수 있습니다.")
-
-    with st.expander("예상 Workflow", expanded=not bool(missing_requirements)):
-        for step in plan_data.get("steps", []):
-            st.markdown(f"- {describe_plan_step(step)}")
-
-    graph = plan_data.get("graph", {})
-    mermaid = graph.get("mermaid", "")
-    if mermaid:
-        with st.expander("LangGraph 시각화", expanded=False):
-            st.code(mermaid, language="text")
-            st.caption("Mermaid 지원 도구에 붙여 넣으면 node/edge 흐름을 시각화할 수 있습니다.")
-
-
 def show_toasts(notice_list: list[str], error_list: list[str]) -> None:
     for notice in notice_list:
         st.toast(notice)
@@ -323,6 +293,63 @@ def show_toasts(notice_list: list[str], error_list: list[str]) -> None:
 
     if error_list:
         st.toast("입력한 기술 스택과 프레임워크 설정을 먼저 수정하세요.")
+
+
+def _format_run_result(run_status: dict[str, object]) -> str:
+    result = run_status.get("result", {}) if isinstance(run_status.get("result"), dict) else {}
+    executed = result.get("executed", []) if isinstance(result, dict) else []
+    final_summary = str(result.get("final_summary", "")).strip() if isinstance(result, dict) else ""
+    lines = ["실행 결과"]
+    if final_summary:
+        lines.append(f"- 최종 요약: {final_summary}")
+    for item in executed:
+        if not isinstance(item, dict):
+            continue
+        agent_name = str(item.get("agent", "unknown")).strip()
+        success = bool(item.get("success", False))
+        lines.append(f"- {agent_name}: {'success' if success else 'failed'}")
+        notes = item.get("notes", [])
+        if isinstance(notes, list) and notes:
+            first_note = str(notes[0]).strip()
+            if first_note:
+                lines.append(f"  - note: {first_note}")
+    return "\n".join(lines)
+
+
+def poll_active_run(api_url: str) -> None:
+    run_id = str(st.session_state.get("active_run_id", "")).strip()
+    if not run_id:
+        return
+
+    try:
+        run_status = get_supervisor_run_status(api_url, run_id)
+    except Exception as exc:
+        st.warning(f"실행 상태 조회 실패(run_id={run_id}): {exc}")
+        return
+
+    status = str(run_status.get("status", "")).strip()
+    st.session_state.active_run_status = status
+
+    if status in {"queued", "running"}:
+        st.info(f"실행 중입니다. run_id={run_id}, status={status}")
+        time.sleep(2)
+        st.rerun()
+        return
+
+    if st.session_state.active_run_notified:
+        return
+
+    if status == "succeeded":
+        st.session_state.messages.append({"role": "assistant", "content": _format_run_result(run_status)})
+    else:
+        error = str(run_status.get("error", "unknown error")).strip()
+        st.session_state.messages.append(
+            {"role": "assistant", "content": f"실행 실패(run_id={run_id}): {error}"}
+        )
+
+    st.session_state.active_run_notified = True
+    st.session_state.active_run_id = ""
+    st.rerun()
 
 
 def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
@@ -337,40 +364,18 @@ def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
     message = json.dumps(payload, indent=2)
     st.session_state.messages.append({"role": "user", "content": message})
     try:
-        reply = request_chat_reply(api_url, payload, st.session_state.messages[:-1])
+        enqueue = start_supervisor_run(api_url, payload)
+        run_id = str(enqueue.get("run_id", "")).strip()
+        if not run_id:
+            raise RuntimeError("run_id is missing in async run response.")
+        st.session_state.active_run_id = run_id
+        st.session_state.active_run_status = str(enqueue.get("status", "queued"))
+        st.session_state.active_run_notified = False
+        reply = f"실행 요청을 접수했습니다. run_id={run_id}, status={st.session_state.active_run_status}"
     except Exception as exc:
         reply = f"Error: {exc}"
     st.session_state.messages.append({"role": "assistant", "content": reply})
     st.rerun()
-
-
-def payload_cache_key(api_url: str, payload: dict[str, object]) -> str:
-    return f"{api_url}::{json.dumps(payload, sort_keys=True, ensure_ascii=False)}"
-
-
-def resolve_plan_data(
-    plan_check: bool,
-    submit: bool,
-    api_url: str,
-    payload: dict[str, object],
-    validation_errors: list[str],
-) -> tuple[dict[str, object] | None, str | None]:
-    cache_key = payload_cache_key(api_url, payload)
-    should_fetch = (plan_check or submit) and not validation_errors
-
-    if should_fetch and st.session_state.plan_cache_key != cache_key:
-        plan_data, plan_error = fetch_plan(api_url, payload)
-        st.session_state.plan_cache_key = cache_key
-        st.session_state.plan_cache_data = plan_data
-        st.session_state.plan_cache_error = plan_error
-    elif should_fetch and st.session_state.plan_cache_key == cache_key:
-        plan_data = st.session_state.plan_cache_data
-        plan_error = st.session_state.plan_cache_error
-    else:
-        plan_data = st.session_state.plan_cache_data if st.session_state.plan_cache_key == cache_key else None
-        plan_error = st.session_state.plan_cache_error if st.session_state.plan_cache_key == cache_key else None
-
-    return plan_data, plan_error
 
 
 def render_messages() -> None:
@@ -387,23 +392,15 @@ st.caption("인프라 테스트 환경 & 샘플 애플리케이션 자동 개발
 init_messages()
 init_form_state()
 api_url = render_sidebar()
-plan_checked, submitted, form_values = render_form()
+submitted, form_values = render_form()
 sanitized_form_values, notices, validation_errors = apply_form_rules(form_values)
 request_payload = build_user_request(sanitized_form_values)
-
-plan_data, plan_error = resolve_plan_data(
-    plan_check=plan_checked,
-    submit=submitted,
-    api_url=api_url,
-    payload=request_payload,
-    validation_errors=validation_errors,
-)
 
 st.subheader("테스트 환경 Spec")
 st.code(json.dumps(request_payload, indent=2), language="json")
 st.write("")
 
-render_plan_section(plan_data, plan_error)
 handle_submit(submitted, api_url, request_payload, notices, validation_errors)
+poll_active_run(api_url)
 render_messages()
 st.divider()
