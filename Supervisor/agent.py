@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Annotated, Literal, TypedDict
+from contextvars import ContextVar
 
 from langgraph.graph import END, START, StateGraph
 
@@ -25,6 +27,7 @@ from .models import (
 )
 
 logger = get_agent_logger("supervisor.agent", "supervisor.log")
+_EVENT_CALLBACK: ContextVar = ContextVar("supervisor_event_callback", default=None)
 
 
 class SupervisorState(TypedDict, total=False):
@@ -119,6 +122,31 @@ class SupervisorAgent:
 
     def graph_view(self) -> GraphView:
         return GraphView(nodes=GRAPH_NODES, edges=GRAPH_EDGES, mermaid=GRAPH_MERMAID)
+
+    def _emit_event(
+        self,
+        *,
+        owner: Literal["supervisor", "infra_build", "sample_app"],
+        phase: str,
+        status: Literal["started", "planned", "progress", "completed", "failed"],
+        message: str,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        callback = _EVENT_CALLBACK.get()
+        if callback is None:
+            return
+        payload = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "owner": owner,
+            "phase": phase,
+            "status": status,
+            "message": message,
+            "details": details or {},
+        }
+        try:
+            callback(payload)
+        except Exception:  # pragma: no cover
+            return
 
     def _missing_info(self, req: UserRequest) -> list[MissingRequirement]:
         missing: list[MissingRequirement] = []
@@ -306,9 +334,30 @@ class SupervisorAgent:
     def _plan_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.plan_node", mode=state.get("mode", "unknown")):
+            self._emit_event(
+                owner="supervisor",
+                phase="plan",
+                status="started",
+                message="입력값 검증 및 실행 계획을 생성합니다.",
+            )
             missing_requirements = self._missing_info(request)
             blocked = bool(missing_requirements)
             summary = self.llm.summarize_plan(request, missing_requirements)
+            if blocked:
+                self._emit_event(
+                    owner="supervisor",
+                    phase="plan",
+                    status="failed",
+                    message="필수 입력값이 부족해 실행이 차단되었습니다.",
+                    details={"missing_fields": [item.field for item in missing_requirements]},
+                )
+            else:
+                self._emit_event(
+                    owner="supervisor",
+                    phase="plan",
+                    status="completed",
+                    message="입력값 검증을 통과했습니다. 하위 Agent 실행을 시작합니다.",
+                )
             return {
                 "blocked": blocked,
                 "missing_requirements": missing_requirements,
@@ -338,11 +387,34 @@ class SupervisorAgent:
                 components=request.infra_tech_stack.components,
                 framework=request.app_tech_stack.framework,
             )
+            self._emit_event(
+                owner="supervisor",
+                phase="dispatch",
+                status="planned",
+                message="하위 Agent 호출 순서를 확정했습니다.",
+                details={"dispatch_targets": dispatch_plan},
+            )
             return {"execution_path": ["dispatch"]}
 
     def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.build_infra_node", components=request.infra_tech_stack.components):
+            self._emit_event(
+                owner="infra_build",
+                phase="run",
+                status="started",
+                message="Infra Agent를 호출합니다.",
+                details={
+                    "components": request.infra_tech_stack.components,
+                    "target_hosts": [target.host for target in request.targets],
+                },
+            )
+            self._emit_event(
+                owner="infra_build",
+                phase="run",
+                status="planned",
+                message="인프라 설치 스크립트 생성/검증 후 원격 적용을 수행할 예정입니다.",
+            )
             result = self.infra_agent.run(request, prior_executions=state.get("executed", []))
             execution = result.execution
             log_event(
@@ -352,6 +424,17 @@ class SupervisorAgent:
                 executed_commands=execution.executed_commands,
                 notes=execution.notes,
                 generated_outputs=result.generated_outputs,
+            )
+            self._emit_event(
+                owner="infra_build",
+                phase="run",
+                status="completed" if execution.success else "failed",
+                message="Infra Agent 작업이 완료되었습니다." if execution.success else "Infra Agent 작업이 실패했습니다.",
+                details={
+                    "executed_commands": execution.executed_commands,
+                    "notes": execution.notes,
+                    "generated_outputs": result.generated_outputs,
+                },
             )
             return {
                 "executed": [execution],
@@ -364,6 +447,22 @@ class SupervisorAgent:
     def _generate_app_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.generate_app_node", framework=request.app_tech_stack.framework):
+            self._emit_event(
+                owner="sample_app",
+                phase="run",
+                status="started",
+                message="Application Agent를 호출합니다.",
+                details={
+                    "framework": request.app_tech_stack.framework,
+                    "language": request.app_tech_stack.language,
+                },
+            )
+            self._emit_event(
+                owner="sample_app",
+                phase="run",
+                status="planned",
+                message="애플리케이션 스펙/소스 생성, 정적 검증, 아티팩트 패키징을 수행할 예정입니다.",
+            )
             result = self.sample_app_agent.run(request, prior_executions=state.get("executed", []))
             log_event(
                 logger,
@@ -372,6 +471,17 @@ class SupervisorAgent:
                 executed_commands=result.execution.executed_commands,
                 notes=result.execution.notes,
                 generated_outputs=result.generated_outputs,
+            )
+            self._emit_event(
+                owner="sample_app",
+                phase="run",
+                status="completed" if result.execution.success else "failed",
+                message="Application Agent 작업이 완료되었습니다." if result.execution.success else "Application Agent 작업이 실패했습니다.",
+                details={
+                    "executed_commands": result.execution.executed_commands,
+                    "notes": result.execution.notes,
+                    "generated_outputs": result.generated_outputs,
+                },
             )
             return {
                 "executed": [result.execution],
@@ -432,22 +542,47 @@ class SupervisorAgent:
             )
             return reply, plan, run_result
 
-    def run(self, req: UserRequest) -> SupervisorRunResult:
-        with timed_step(logger, "supervisor.run", framework=req.app_tech_stack.framework):
-            state = self._invoke(req, mode="run")
-            missing_requirements = state.get("missing_requirements", [])
-            if missing_requirements:
-                raise MissingInfoError(
-                    missing_fields=[item.field for item in missing_requirements],
-                    missing_requirements=missing_requirements,
+    def run(self, req: UserRequest, event_callback=None) -> SupervisorRunResult:
+        token = _EVENT_CALLBACK.set(event_callback) if event_callback else None
+        try:
+            with timed_step(logger, "supervisor.run", framework=req.app_tech_stack.framework):
+                self._emit_event(
+                    owner="supervisor",
+                    phase="run",
+                    status="started",
+                    message="Supervisor 실행을 시작합니다.",
                 )
+                state = self._invoke(req, mode="run")
+                missing_requirements = state.get("missing_requirements", [])
+                if missing_requirements:
+                    self._emit_event(
+                        owner="supervisor",
+                        phase="run",
+                        status="failed",
+                        message="필수 입력값이 부족하여 실행을 중단합니다.",
+                        details={"missing_fields": [item.field for item in missing_requirements]},
+                    )
+                    raise MissingInfoError(
+                        missing_fields=[item.field for item in missing_requirements],
+                        missing_requirements=missing_requirements,
+                    )
 
-            result = self._build_run_result_from_state(state)
-            log_event(
-                logger,
-                "supervisor.run.result",
-                final_summary=result.final_summary,
-                execution_path=result.execution_path,
-                generated_outputs=result.generated_outputs,
-            )
-            return result
+                result = self._build_run_result_from_state(state)
+                self._emit_event(
+                    owner="supervisor",
+                    phase="run",
+                    status="completed",
+                    message="Supervisor 실행이 완료되었습니다.",
+                    details={"final_summary": result.final_summary},
+                )
+                log_event(
+                    logger,
+                    "supervisor.run.result",
+                    final_summary=result.final_summary,
+                    execution_path=result.execution_path,
+                    generated_outputs=result.generated_outputs,
+                )
+                return result
+        finally:
+            if token is not None:
+                _EVENT_CALLBACK.reset(token)

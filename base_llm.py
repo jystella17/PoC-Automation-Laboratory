@@ -36,6 +36,7 @@ class BaseLLM:
             azure_deployment=self.settings.deployment_name,
             api_version=self.settings.api_version,
             temperature=self.settings.temperature,
+            timeout=120,
         )
 
     def _strip_code_fences(self, text: str) -> str:
