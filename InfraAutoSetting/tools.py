@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -173,7 +174,22 @@ class InfraTools:
         }
 
     def _build_ssh_command(self, target: TargetHost) -> list[str]:
-        base = ["ssh"]
+        strict_host_key_checking = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "accept-new").strip() or "accept-new"
+        user_known_hosts_file = os.getenv("SSH_USER_KNOWN_HOSTS_FILE", "").strip()
+        if not user_known_hosts_file:
+            user_known_hosts_file = str(Path.home() / ".ssh" / "known_hosts")
+
+        base = [
+            "ssh",
+            "-o",
+            f"StrictHostKeyChecking={strict_host_key_checking}",
+            "-o",
+            f"UserKnownHostsFile={user_known_hosts_file}",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+        ]
         if target.auth_method == "pem_path":
             base += ["-i", target.auth_ref]
         base += ["-p", str(target.ssh_port), f"{target.user}@{target.host}", "bash -s"]

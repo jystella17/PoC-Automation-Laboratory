@@ -242,7 +242,13 @@ class InfraAutoSettingAgent:
             prior_executions=prior_executions,
             fallback_script=fallback_script,
         )
-        return llm_script if llm_script else fallback_script
+        script = llm_script if llm_script else fallback_script
+        return self._enforce_java_runtime_policy(
+            script=script,
+            request=request,
+            resolved_versions=versions,
+            package_manager=self._resolve_package_manager(request),
+        )
 
     def _build_script_fallback(
         self,
@@ -333,3 +339,60 @@ class InfraAutoSettingAgent:
                 continue
             output.extend(note.strip() for note in execution.notes if note.strip())
         return output[:10]
+
+    def _enforce_java_runtime_policy(
+        self,
+        script: str,
+        request: UserRequest,
+        resolved_versions: dict[str, str],
+        package_manager: str,
+    ) -> str:
+        if not self._requires_java(request):
+            return script
+        java_major = self._java_major(resolved_versions.get("java", ""))
+        if not java_major:
+            return script
+
+        marker = "# Enforce requested Java runtime"
+        if marker in script:
+            return script
+
+        prefix = "sudo " if request.constraints.sudo_allowed in {"yes", "limited"} else ""
+        if package_manager == "apt":
+            install_cmd = f"{prefix}apt -y install openjdk-{java_major}-jdk"
+        elif package_manager == "dnf":
+            install_cmd = f"{prefix}dnf -y install java-{java_major}-openjdk-devel"
+        else:
+            install_cmd = f"echo 'Unsupported package manager for Java install: {package_manager}'; exit 1"
+
+        java_block = [
+            "",
+            marker,
+            install_cmd,
+            "JAVA_MAJOR=\"$(java -version 2>&1 | awk -F'[\\\".]' '/version/ {print $2}')\"",
+            f"if [ \"$JAVA_MAJOR\" != \"{java_major}\" ]; then",
+            f"  echo \"Requested Java {java_major}, but detected ${{JAVA_MAJOR}}.\"",
+            "  exit 1",
+            "fi",
+            f"echo \"Java {java_major} is installed and active.\"",
+            "",
+        ]
+        base = script if script.endswith("\n") else script + "\n"
+        return base + "\n".join(java_block)
+
+    def _requires_java(self, request: UserRequest) -> bool:
+        components = {component.strip().lower() for component in request.infra_tech_stack.components}
+        languages = [language.strip().lower() for language in request.app_tech_stack.language]
+        framework = request.app_tech_stack.framework.strip().lower()
+        if components.intersection({"tomcat", "kafka"}):
+            return True
+        if framework in {"spring", "spring boot"}:
+            return True
+        return any(language.startswith("java") for language in languages)
+
+    def _java_major(self, source: str) -> str:
+        value = source.strip()
+        if not value:
+            return ""
+        match = re.search(r"\d+", value)
+        return match.group(0) if match else ""
