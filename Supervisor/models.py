@@ -55,6 +55,7 @@ class LoggingConfig(BaseModel):
 class AppTechStack(BaseModel):
     framework: str = ""
     minor_version: str = ""
+    build_system: Literal["auto", "maven", "gradle"] = "auto"
     language: List[str] = Field(default_factory=lambda: [""])
     databases: str = ""
     db_user: str = ""
