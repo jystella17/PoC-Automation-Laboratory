@@ -12,6 +12,7 @@ from api_client import (
     start_supervisor_run,
 )
 from form_logic import (
+    BUILD_SYSTEM_OPTIONS,
     COMPONENT_OPTIONS,
     COMPONENT_RULES,
     COMPONENT_VERSION_OPTIONS,
@@ -54,6 +55,7 @@ def init_form_state() -> None:
         "pinpoint_agent_instance": 0,
         "framework": "None",
         "framework_version": "None",
+        "build_system": "auto",
         "application_instance": 0,
         "language": [],
     }
@@ -197,6 +199,12 @@ def render_form() -> tuple[bool, dict[str, object]]:
             FRAMEWORK_VERSION_OPTIONS,
             key="framework_version",
         )
+        build_system = st.selectbox(
+            "빌드 도구 (Spring/Spring Boot)",
+            BUILD_SYSTEM_OPTIONS,
+            key="build_system",
+            help="Spring 계열에서 maven/gradle 선택. auto는 Agent가 요청 문맥으로 결정합니다.",
+        )
         application_instance = st.number_input(
             "애플리케이션 인스턴스 수",
             min_value=0,
@@ -260,6 +268,7 @@ def render_form() -> tuple[bool, dict[str, object]]:
         "no_public_upload": no_public_upload,
         "framework": st.session_state.get("framework", framework),
         "framework_version": st.session_state.get("framework_version", framework_version),
+        "build_system": st.session_state.get("build_system", build_system),
         "language": st.session_state.get("language", language),
         "database": database,
         "db_user": db_user,

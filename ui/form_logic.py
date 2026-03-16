@@ -11,6 +11,7 @@ LANGUAGE_OPTIONS = ["Java21", "Java17", "Python3.12", "Python3.11", "프롬프�
 DATABASE_OPTIONS = ["None", "MySQL", "PostgreSQL", "MariaDB", "Redis", "MongoDB"]
 FRAMEWORK_OPTIONS = ["None", "Spring Boot", "Spring", "FastAPI"]
 FRAMEWORK_VERSION_OPTIONS = ["None", "Spring Boot 4.0", "Spring Boot 3.5", "Spring Boot 3.0", "Spring 2.7", "FastAPI 0.135.1"]
+BUILD_SYSTEM_OPTIONS = ["auto", "maven", "gradle"]
 FRAMEWORK_DEFAULT_VERSION = {
     "None": "None",
     "Spring Boot": "Spring Boot 4.0",
@@ -254,6 +255,7 @@ def build_user_request(form_values: dict[str, Any]) -> dict[str, Any]:
         "app_tech_stack": {
             "framework": form_values["framework"],
             "minor_version": form_values["framework_version"],
+            "build_system": form_values["build_system"],
             "language": form_values["language"],
             "databases": form_values["database"],
             "db_user": form_values["db_user"],
