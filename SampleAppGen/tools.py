@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import ast
+import os
+import re
 import shutil
+import subprocess
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
+from Supervisor.models import TargetHost, UserRequest
 from agent_logging import get_agent_logger, timed_step
 
 from .models import ValidationIssue
@@ -34,6 +38,12 @@ class DockerBuildResult(TypedDict):
     ok: bool
     image_name: str
     tag: str
+    image_ref: str
+    archive_path: str
+    remote_archive_path: str
+    command_label: str
+    stderr: str
+    error_code: str
 
 
 class SampleAppTools:
@@ -95,13 +105,30 @@ class SampleAppTools:
                 if "app/main.py" not in existing_files:
                     issues.append(ValidationIssue(path="app/main.py", message="FastAPI entrypoint is required."))
             elif normalized in {"spring", "spring boot"}:
-                required = {
-                    "pom.xml": "Maven build descriptor is required.",
-                    "src/main/java/com/example/sampleapp/SampleAppApplication.java": "Spring boot entrypoint is required.",
-                }
-                for path, message in required.items():
-                    if path not in existing_files:
-                        issues.append(ValidationIssue(path=path, message=message))
+                has_pom = any(Path(path).name == "pom.xml" for path in existing_files)
+                has_gradle = any(Path(path).name in {"build.gradle", "build.gradle.kts"} for path in existing_files)
+                if not has_pom and not has_gradle:
+                    issues.append(
+                        ValidationIssue(
+                            path="pom.xml|build.gradle",
+                            message="Java build descriptor is required (Maven pom.xml or Gradle build.gradle).",
+                        )
+                    )
+
+                # Validate by semantic markers instead of hard-coded package/file path.
+                has_spring_entrypoint = any(
+                    path.endswith(".java")
+                    and "@SpringBootApplication" in content
+                    and "SpringApplication.run(" in content
+                    for path, content in existing_files.items()
+                )
+                if not has_spring_entrypoint:
+                    issues.append(
+                        ValidationIssue(
+                            path="src/main/java/**/Application.java",
+                            message="Spring boot entrypoint is required.",
+                        )
+                    )
 
             return {
                 "ok": len(issues) == 0,
@@ -114,7 +141,210 @@ class SampleAppTools:
             archive_path = shutil.make_archive(str(output_base), "zip", root_dir=project_dir)
             return {"ok": True, "output_path": archive_path}
 
-    def docker_build(self, image_name: str, tag: str = "latest") -> DockerBuildResult:
+    def docker_build(
+        self,
+        project_dir: Path,
+        image_name: str,
+        request: UserRequest,
+        output_dir: Path,
+        tag: str = "latest",
+    ) -> DockerBuildResult:
         with timed_step(logger, "sample_app_gen.tools.docker_build", image_name=image_name, tag=tag):
-            # Current implementation records docker build intent for downstream deployment.
-            return {"ok": True, "image_name": image_name, "tag": tag}
+            target = request.targets[0] if request.targets else None
+            image_ref = self._image_ref(image_name=image_name, tag=tag)
+            archive_path = output_dir / f"{self._safe_name(image_ref)}.tar"
+            remote_archive_path = f"/tmp/{archive_path.name}"
+            command_label = f"docker_build --target {image_ref}"
+
+            if target is None:
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_TARGET_MISSING",
+                    stderr="No target host was provided for docker image upload.",
+                )
+
+            if target.auth_method != "pem_path":
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_AUTH_UNSUPPORTED",
+                    stderr=f"Unsupported auth_method for docker image upload: {target.auth_method}",
+                )
+
+            if os.getenv("SAMPLE_APP_AGENT_DRY_RUN", "false").lower() != "false":
+                return {
+                    "ok": True,
+                    "image_name": image_name,
+                    "tag": tag,
+                    "image_ref": image_ref,
+                    "archive_path": str(archive_path),
+                    "remote_archive_path": remote_archive_path,
+                    "command_label": command_label + " --dry-run",
+                    "stderr": "",
+                    "error_code": "",
+                }
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            build_result = subprocess.run(
+                ["docker", "build", "-t", image_ref, str(project_dir)],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=1800,
+            )
+            if build_result.returncode != 0:
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_DOCKER_BUILD",
+                    stderr=build_result.stderr or build_result.stdout,
+                )
+
+            save_result = subprocess.run(
+                ["docker", "image", "save", "-o", str(archive_path), image_ref],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=1800,
+            )
+            if save_result.returncode != 0:
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_DOCKER_SAVE",
+                    stderr=save_result.stderr or save_result.stdout,
+                )
+
+            scp_result = subprocess.run(
+                self._build_scp_command(target=target, local_path=archive_path, remote_path=remote_archive_path),
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=1800,
+            )
+            if scp_result.returncode != 0:
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_IMAGE_UPLOAD",
+                    stderr=scp_result.stderr or scp_result.stdout,
+                )
+
+            remote_result = subprocess.run(
+                self._build_ssh_command(
+                    target=target,
+                    remote_command=f"docker load -i {self._shell_quote(remote_archive_path)} && rm -f {self._shell_quote(remote_archive_path)}",
+                ),
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=1800,
+            )
+            if remote_result.returncode != 0:
+                return self._docker_error(
+                    image_name=image_name,
+                    tag=tag,
+                    image_ref=image_ref,
+                    archive_path=str(archive_path),
+                    remote_archive_path=remote_archive_path,
+                    command_label=command_label,
+                    error_code="E_DOCKER_REMOTE_LOAD",
+                    stderr=remote_result.stderr or remote_result.stdout,
+                )
+
+            return {
+                "ok": True,
+                "image_name": image_name,
+                "tag": tag,
+                "image_ref": image_ref,
+                "archive_path": str(archive_path),
+                "remote_archive_path": remote_archive_path,
+                "command_label": command_label,
+                "stderr": "",
+                "error_code": "",
+            }
+
+    def _image_ref(self, image_name: str, tag: str) -> str:
+        return image_name if ":" in image_name.rsplit("/", maxsplit=1)[-1] else f"{image_name}:{tag}"
+
+    def _safe_name(self, value: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9_.-]", "-", value)
+
+    def _common_ssh_options(self) -> list[str]:
+        strict_host_key_checking = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "accept-new").strip() or "accept-new"
+        user_known_hosts_file = os.getenv("SSH_USER_KNOWN_HOSTS_FILE", "").strip()
+        if not user_known_hosts_file:
+            user_known_hosts_file = str(Path.home() / ".ssh" / "known_hosts")
+        return [
+            "-o",
+            f"StrictHostKeyChecking={strict_host_key_checking}",
+            "-o",
+            f"UserKnownHostsFile={user_known_hosts_file}",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=15",
+        ]
+
+    def _build_ssh_command(self, target: TargetHost, remote_command: str) -> list[str]:
+        base = ["ssh", *self._common_ssh_options()]
+        if target.auth_method == "pem_path":
+            base += ["-i", target.auth_ref]
+        base += ["-p", str(target.ssh_port), f"{target.user}@{target.host}", remote_command]
+        return base
+
+    def _build_scp_command(self, target: TargetHost, local_path: Path, remote_path: str) -> list[str]:
+        base = ["scp", *self._common_ssh_options()]
+        if target.auth_method == "pem_path":
+            base += ["-i", target.auth_ref]
+        base += ["-P", str(target.ssh_port), str(local_path), f"{target.user}@{target.host}:{remote_path}"]
+        return base
+
+    def _shell_quote(self, value: str) -> str:
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+
+    def _docker_error(
+        self,
+        *,
+        image_name: str,
+        tag: str,
+        image_ref: str,
+        archive_path: str,
+        remote_archive_path: str,
+        command_label: str,
+        error_code: str,
+        stderr: str,
+    ) -> DockerBuildResult:
+        return {
+            "ok": False,
+            "image_name": image_name,
+            "tag": tag,
+            "image_ref": image_ref,
+            "archive_path": archive_path,
+            "remote_archive_path": remote_archive_path,
+            "command_label": command_label,
+            "stderr": stderr,
+            "error_code": error_code,
+        }

@@ -48,6 +48,7 @@ class SampleAppGeneratorLLM(BaseLLM):
                 "\"framework\": str, "
                 "\"framework_version\": str, "
                 "\"language\": str, "
+                "\"build_system\": \"maven\"|\"gradle\", "
                 "\"runtime_version\": str, "
                 "\"artifact_type\": \"jar\"|\"zip\", "
                 "\"artifact_name\": str, "
@@ -64,8 +65,10 @@ class SampleAppGeneratorLLM(BaseLLM):
                 f"project_dir: {project_dir}\n"
                 f"user_request_json:\n{request.model_dump_json(indent=2)}\n"
                 f"prior_infra_execution_notes:\n{infra_notes}\n"
+                f"requested_build_system: {request.app_tech_stack.build_system or 'auto'}\n"
                 "The file plan must include all files required to build or run the app locally. "
                 "Use Java for Spring/Spring Boot and Python for FastAPI. "
+                "For Spring/Spring Boot, choose build_system as maven or gradle based on user request/additional_request. "
                 "Use environment variables for DB passwords. "
                 "The spec_markdown must include endpoints, data/config notes, and any requested failure scenarios."
             )
@@ -81,6 +84,7 @@ class SampleAppGeneratorLLM(BaseLLM):
                     framework=data["framework"],
                     framework_version=data["framework_version"],
                     language=data["language"],
+                    build_system=data.get("build_system", "maven"),
                     runtime_version=data.get("runtime_version", ""),
                     artifact_type=data.get("artifact_type", "zip"),
                     artifact_name=data["artifact_name"],

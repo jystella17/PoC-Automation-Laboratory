@@ -23,6 +23,7 @@ class ApplicationPlan(BaseModel):
     framework: str
     framework_version: str
     language: str
+    build_system: Literal["maven", "gradle"] = "maven"
     runtime_version: str = ""
     artifact_type: Literal["jar", "zip"] = "zip"
     artifact_name: str

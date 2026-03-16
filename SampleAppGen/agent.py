@@ -3,7 +3,6 @@ from __future__ import annotations
 import operator
 import re
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Annotated, TypedDict
 
@@ -56,7 +55,8 @@ class SampleAppAgent:
         workspace_root: str | Path | None = None,
         max_repairs: int = 2,
     ):
-        base_dir = Path(workspace_root) if workspace_root else Path(tempfile.gettempdir()) / "sampleappgen-workspace"
+        # Store generated source/artifacts under the project root by default.
+        base_dir = Path(workspace_root) if workspace_root else Path(__file__).resolve().parents[1]
         self.workspace_root = base_dir / "generated_apps"
         self.max_repairs = max_repairs
         self.llm = SampleAppGeneratorLLM(settings or AzureOpenAISettings())
@@ -162,6 +162,7 @@ class SampleAppAgent:
                     framework=request.app_tech_stack.framework or "unknown",
                     framework_version=request.app_tech_stack.minor_version or "latest",
                     language="unknown",
+                    build_system="maven",
                     artifact_name="sample-app.zip",
                     image_name="sample-app/sample-app:latest",
                     project_dir="",
@@ -312,12 +313,20 @@ class SampleAppAgent:
     def _package_artifacts_node(self, state: SampleAppState) -> SampleAppState:
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.package_artifacts_node", app_id=plan.app_id):
+            request = state["request"]
             project_dir = Path(plan.project_dir)
             dist_dir = self.workspace_root / "artifacts"
             archive_base = dist_dir / plan.app_id
             build = self.tools.call("build_code", project_dir=project_dir, output_base=archive_base)
             archive_path = build["output_path"]
-            docker = self.tools.call("docker_build", image_name=plan.image_name, tag="latest")
+            docker = self.tools.call(
+                "docker_build",
+                project_dir=project_dir,
+                image_name=plan.image_name,
+                request=request,
+                output_dir=dist_dir,
+                tag="latest",
+            )
 
             recommended = [f"APP_LOG_DIR={plan.log_dir}", *plan.required_env]
             if plan.language.lower().startswith("java") and plan.gc_log_dir:
@@ -326,27 +335,48 @@ class SampleAppAgent:
             notes = [
                 f"DEPLOY_CMD: {plan.deployment_commands[0] if plan.deployment_commands else 'docker run ...'}",
                 f"Artifact bundle prepared at {archive_path}.",
-                "Artifact is ready for deployment via Infra Agent.",
             ]
+            generated_outputs = [
+                "배포 가이드라인 및 API 문서",
+                f"artifact bundle: {archive_path}",
+            ]
+            rollback_cleanup = [*state.get("rollback_cleanup", []), f"rm -f {archive_path}"]
+            executed_commands = [
+                f"build_code --path {project_dir} --output {archive_path}",
+                docker["command_label"],
+            ]
+
+            if docker["ok"]:
+                notes.extend(
+                    [
+                        f"IMAGE_REF: {docker['image_ref']}",
+                        f"IMAGE_ARCHIVE: {docker['archive_path']}",
+                        f"REMOTE_IMAGE_ARCHIVE: {docker['remote_archive_path']}",
+                        "Docker image was built locally and loaded on the target host.",
+                    ]
+                )
+                generated_outputs.append(f"container image: {docker['image_ref']}")
+                rollback_cleanup.extend([f"rm -f {docker['archive_path']}", f"docker image rm {docker['image_ref']}"])
+            else:
+                notes.extend(
+                    [
+                        f"DOCKER_UPLOAD_ERROR: {docker['error_code']}",
+                        f"DOCKER_UPLOAD_STDERR: {docker['stderr'][:400]}" if docker["stderr"] else "DOCKER_UPLOAD_STDERR: none",
+                    ]
+                )
+
             if self.llm.is_available:
                 notes.append("LLM generated the application plan and source files.")
             else:
                 notes.append("Azure OpenAI is not configured, so fallback generation was used.")
 
             return {
-                "executed_commands": [
-                    f"build_code --path {project_dir} --output {archive_path}",
-                    f"docker_build --target {docker['image_name']} --tag {docker['tag']}",
-                ],
-                "generated_outputs": [
-                    "배포 가이드라인 및 API 문서",
-                    f"artifact bundle: {archive_path}",
-                    f"container image plan: {plan.image_name}",
-                ],
+                "executed_commands": executed_commands,
+                "generated_outputs": generated_outputs,
                 "recommended_config": recommended,
-                "rollback_cleanup": [*state.get("rollback_cleanup", []), f"rm -f {archive_path}", f"docker image rm {plan.image_name}"],
+                "rollback_cleanup": rollback_cleanup,
                 "notes": notes,
-                "success": True,
+                "success": docker["ok"],
             }
 
     def _finalize_node(self, state: SampleAppState) -> SampleAppState:
@@ -370,13 +400,15 @@ class SampleAppAgent:
         framework = request.app_tech_stack.framework.strip() or "FastAPI"
         runtime_version = self._runtime_version(language)
         is_java = language.lower().startswith("java")
+        build_system = self._resolve_build_system(request=request, framework=framework)
         port = "8080" if is_java else "8000"
-        file_plan = self._fallback_file_plan(framework)
+        file_plan = self._fallback_file_plan(framework, build_system=build_system)
         return ApplicationPlan(
             app_id=app_id,
             framework=framework,
             framework_version=request.app_tech_stack.minor_version or "latest",
             language=language,
+            build_system=build_system,
             runtime_version=runtime_version,
             artifact_type="jar" if is_java else "zip",
             artifact_name=f"{app_id}.{'jar' if is_java else 'zip'}",
@@ -388,10 +420,10 @@ class SampleAppAgent:
             deployment_commands=[self._deployment_command(port, request, f"sample-app/{app_id}:latest")],
             required_env=self._required_env(request),
             file_plan=file_plan,
-            spec_markdown=self._fallback_spec_markdown(request, framework, language, app_id, file_plan),
+            spec_markdown=self._fallback_spec_markdown(request, framework, language, app_id, file_plan, build_system),
         )
 
-    def _fallback_file_plan(self, framework: str) -> list[ApplicationFilePlan]:
+    def _fallback_file_plan(self, framework: str, build_system: str = "maven") -> list[ApplicationFilePlan]:
         if framework.strip().lower() == "fastapi":
             return [
                 ApplicationFilePlan(path="requirements.txt", purpose="Python dependencies", language="text"),
@@ -400,14 +432,23 @@ class SampleAppAgent:
                 ApplicationFilePlan(path="Dockerfile", purpose="Container build file", language="dockerfile"),
                 ApplicationFilePlan(path="README.md", purpose="Generated project guide", language="markdown"),
             ]
-        return [
-            ApplicationFilePlan(path="pom.xml", purpose="Maven build descriptor", language="xml"),
+        java_files = [
             ApplicationFilePlan(path="src/main/java/com/example/sampleapp/SampleAppApplication.java", purpose="Spring Boot entrypoint", language="java"),
             ApplicationFilePlan(path="src/main/java/com/example/sampleapp/DemoController.java", purpose="REST controller", language="java"),
             ApplicationFilePlan(path="src/main/resources/application.yml", purpose="Application config", language="yaml"),
             ApplicationFilePlan(path=".env.example", purpose="Example environment variables", language="dotenv"),
             ApplicationFilePlan(path="Dockerfile", purpose="Container build file", language="dockerfile"),
             ApplicationFilePlan(path="README.md", purpose="Generated project guide", language="markdown"),
+        ]
+        if build_system == "gradle":
+            return [
+                ApplicationFilePlan(path="settings.gradle", purpose="Gradle settings", language="gradle"),
+                ApplicationFilePlan(path="build.gradle", purpose="Gradle build descriptor", language="gradle"),
+                *java_files,
+            ]
+        return [
+            ApplicationFilePlan(path="pom.xml", purpose="Maven build descriptor", language="xml"),
+            *java_files,
         ]
 
     def _fallback_file_content(self, request: UserRequest, plan: ApplicationPlan, file_plan: ApplicationFilePlan) -> str:
@@ -433,6 +474,10 @@ class SampleAppAgent:
             return self._fallback_fastapi_main(request, plan)
         if path == "pom.xml":
             return self._fallback_pom(plan)
+        if path == "build.gradle":
+            return self._fallback_gradle_build(plan)
+        if path == "settings.gradle":
+            return f"rootProject.name = '{plan.app_id}'\n"
         if path.endswith("SampleAppApplication.java"):
             return (
                 "package com.example.sampleapp;\n\n"
@@ -525,6 +570,7 @@ class SampleAppAgent:
         language: str,
         app_id: str,
         file_plan: list[ApplicationFilePlan],
+        build_system: str,
     ) -> str:
         files = "\n".join(f"- `{item.path}`: {item.purpose}" for item in file_plan)
         scenarios = "\n".join(f"- {item}" for item in self._detect_special_scenarios(request.additional_request)) or "- none"
@@ -536,6 +582,7 @@ class SampleAppAgent:
                 f"- framework: {framework}",
                 f"- framework_version: {request.app_tech_stack.minor_version or 'latest'}",
                 f"- language: {language}",
+                f"- build_system: {build_system}",
                 f"- logging_dir: {request.logging.app_log_dir}",
                 "",
                 "## Requested Scenarios",
@@ -573,3 +620,45 @@ class SampleAppAgent:
     def _runtime_version(self, language: str) -> str:
         values = re.findall(r"\d+(?:\.\d+)?", language)
         return values[0] if values else ""
+
+    def _resolve_build_system(self, request: UserRequest, framework: str) -> str:
+        if framework.strip().lower() not in {"spring", "spring boot"}:
+            return "maven"
+        requested = str(getattr(request.app_tech_stack, "build_system", "")).strip().lower()
+        if requested in {"maven", "gradle"}:
+            return requested
+        if "gradle" in request.additional_request.lower():
+            return "gradle"
+        return "maven"
+
+    def _fallback_gradle_build(self, plan: ApplicationPlan) -> str:
+        spring_boot_version = "3.5.0"
+        if "4.0" in plan.framework_version:
+            spring_boot_version = "4.0.0"
+        elif "3.0" in plan.framework_version:
+            spring_boot_version = "3.0.0"
+        java_version = plan.runtime_version or "17"
+        return (
+            "plugins {\n"
+            "    id 'java'\n"
+            "    id 'org.springframework.boot' version '" + spring_boot_version + "'\n"
+            "    id 'io.spring.dependency-management' version '1.1.7'\n"
+            "}\n\n"
+            "group = 'com.example'\n"
+            "version = '0.0.1-SNAPSHOT'\n\n"
+            "java {\n"
+            "    toolchain {\n"
+            "        languageVersion = JavaLanguageVersion.of(" + java_version + ")\n"
+            "    }\n"
+            "}\n\n"
+            "repositories {\n"
+            "    mavenCentral()\n"
+            "}\n\n"
+            "dependencies {\n"
+            "    implementation 'org.springframework.boot:spring-boot-starter-web'\n"
+            "    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n"
+            "}\n\n"
+            "tasks.named('test') {\n"
+            "    useJUnitPlatform()\n"
+            "}\n"
+        )
