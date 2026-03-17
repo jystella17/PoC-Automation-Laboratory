@@ -9,6 +9,7 @@ from pathlib import Path
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, GraphView, TargetHost, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
+from eventing import emit_event
 
 from .llm import InfraScriptGeneratorLLM
 from .models import GRAPH_EDGES, GRAPH_MERMAID, GRAPH_NODES, InfraBuildRunResult, InfraScriptArtifact
@@ -61,8 +62,10 @@ class InfraAutoSettingAgent:
         prior_executions = prior_executions or []
         with timed_step(logger, "infra_auto_setting.run", component_count=len(request.infra_tech_stack.components)):
             try:
+                emit_event(owner="infra_build", phase="plan_script", status="started", message="인프라 스크립트 계획을 시작합니다.", details={"components": request.infra_tech_stack.components})
                 resolved_versions, version_notes = self._resolve_versions(request.infra_tech_stack.versions)
                 script = self._build_script(request, resolved_versions, prior_executions)
+                emit_event(owner="infra_build", phase="plan_script", status="completed", message="인프라 스크립트 계획이 완료되었습니다.", details={"resolved_versions": resolved_versions})
                 artifact = self.tools.call(
                     "execution_file_write",
                     path=self._script_path(request),
@@ -110,6 +113,7 @@ class InfraAutoSettingAgent:
                 )
             except Exception as exc:
                 log_event(logger, "infra_auto_setting.run.exception", error=str(exc))
+                emit_event(owner="infra_build", phase="run", status="failed", message="인프라 Agent 실행 중 예외가 발생했습니다.", details={"error": str(exc)})
                 return self._unexpected_failure_result(str(exc))
 
     def _validation_failed_result(

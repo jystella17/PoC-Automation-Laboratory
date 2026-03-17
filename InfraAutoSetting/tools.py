@@ -8,6 +8,7 @@ from typing import Any, Literal, TypedDict
 
 from Supervisor.models import TargetHost, UserRequest
 from agent_logging import get_agent_logger, timed_step
+from eventing import emit_event
 
 logger = get_agent_logger("infra_auto_setting.tools", "infra_auto_setting.log")
 
@@ -62,12 +63,14 @@ class InfraTools:
         chmod: str | None = None,
     ) -> FileWriteResult:
         with timed_step(logger, "infra_auto_setting.tools.execution_file_write", path=str(path)):
+            emit_event(owner="infra_build", phase="tool.execution_file_write", status="started", message="인프라 스크립트 파일을 생성합니다.", details={"path": str(path)})
             if path.exists() and not overwrite:
                 raise FileExistsError(f"File already exists: {path}")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
             if chmod:
                 path.chmod(int(chmod, 8))
+            emit_event(owner="infra_build", phase="tool.execution_file_write", status="completed", message="인프라 스크립트 파일 생성이 완료되었습니다.", details={"path": str(path)})
             return {
                 "ok": True,
                 "written_path": str(path),
@@ -76,6 +79,7 @@ class InfraTools:
 
     def code_validator(self, script_path: str, request: UserRequest) -> ValidationResult:
         with timed_step(logger, "infra_auto_setting.tools.code_validator", script_path=script_path):
+            emit_event(owner="infra_build", phase="tool.code_validator", status="started", message="인프라 스크립트 검증을 시작합니다.", details={"script_path": script_path})
             content = Path(script_path).read_text(encoding="utf-8")
             issues: list[ValidationIssue] = []
 
@@ -113,7 +117,15 @@ class InfraTools:
                 )
 
             has_error = any(item["severity"] == "error" for item in issues)
-            return {"ok": not has_error, "issues": issues}
+            result = {"ok": not has_error, "issues": issues}
+            emit_event(
+                owner="infra_build",
+                phase="tool.code_validator",
+                status="completed" if result["ok"] else "failed",
+                message="인프라 스크립트 검증이 완료되었습니다." if result["ok"] else "인프라 스크립트 검증에서 오류가 발견되었습니다.",
+                details={"issue_count": len(issues)},
+            )
+            return result
 
     def ssh(self, request: UserRequest, local_script_path: str) -> RemoteExecutionResult:
         target = request.targets[0] if request.targets else None
@@ -125,8 +137,9 @@ class InfraTools:
             )
 
         command_label = f"ssh --host {target.host} --port {target.ssh_port} --script {local_script_path}"
+        emit_event(owner="infra_build", phase="tool.ssh", status="started", message="원격 인프라 적용을 시작합니다.", details={"host": target.host, "script_path": local_script_path})
         if self.dry_run:
-            return {
+            result = {
                 "ok": True,
                 "exit_code": 0,
                 "stdout": "Dry-run mode enabled. Remote execution skipped.",
@@ -135,6 +148,8 @@ class InfraTools:
                 "command_label": command_label + " --dry-run",
                 "error_code": "",
             }
+            emit_event(owner="infra_build", phase="tool.ssh", status="completed", message="드라이런 모드로 원격 인프라 적용을 건너뛰었습니다.", details={"host": target.host})
+            return result
 
         ssh_cmd = self._build_ssh_command(target)
         try:
@@ -148,12 +163,16 @@ class InfraTools:
                     timeout=900,
                 )
         except subprocess.TimeoutExpired as exc:
-            return self._remote_error(command_label, "E_SSH_TIMEOUT", str(exc), timed_out=True)
+            result = self._remote_error(command_label, "E_SSH_TIMEOUT", str(exc), timed_out=True)
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용이 타임아웃되었습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            return result
         except Exception as exc:  # pragma: no cover
-            return self._remote_error(command_label, "E_SSH_CONNECT", str(exc))
+            result = self._remote_error(command_label, "E_SSH_CONNECT", str(exc))
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="SSH 연결에 실패했습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            return result
 
         if process.returncode != 0:
-            return {
+            result = {
                 "ok": False,
                 "error_code": "E_REMOTE_EXEC",
                 "stderr": process.stderr,
@@ -162,8 +181,10 @@ class InfraTools:
                 "stdout": process.stdout,
                 "timed_out": False,
             }
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용 명령이 실패했습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            return result
 
-        return {
+        result = {
             "ok": True,
             "exit_code": 0,
             "stdout": process.stdout,
@@ -172,6 +193,8 @@ class InfraTools:
             "command_label": command_label,
             "error_code": "",
         }
+        emit_event(owner="infra_build", phase="tool.ssh", status="completed", message="원격 인프라 적용이 완료되었습니다.", details={"host": target.host})
+        return result
 
     def _build_ssh_command(self, target: TargetHost) -> list[str]:
         strict_host_key_checking = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "accept-new").strip() or "accept-new"
