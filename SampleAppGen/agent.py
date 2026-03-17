@@ -11,6 +11,7 @@ from langgraph.graph import END, START, StateGraph
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, GraphView, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
+from eventing import emit_event
 
 from .llm import SampleAppGeneratorLLM
 from .models import (
@@ -183,6 +184,7 @@ class SampleAppAgent:
     def _plan_spec_node(self, state: SampleAppState) -> SampleAppState:
         request = state["request"]
         with timed_step(logger, "sample_app_gen.plan_spec_node", framework=request.app_tech_stack.framework):
+            emit_event(owner="sample_app", phase="plan_spec", status="started", message="애플리케이션 스펙 계획을 생성합니다.")
             framework = request.app_tech_stack.framework.strip()
             languages = [value.strip() for value in request.app_tech_stack.language if value.strip()]
             primary_language = self._resolve_language(framework, languages)
@@ -203,6 +205,13 @@ class SampleAppAgent:
             else:
                 llm_mode = "llm"
             log_event(logger, "sample_app_gen.plan_spec_node.result", app_id=plan.app_id, llm_mode=llm_mode)
+            emit_event(
+                owner="sample_app",
+                phase="plan_spec",
+                status="completed",
+                message="애플리케이션 스펙 계획 생성이 완료되었습니다.",
+                details={"app_id": plan.app_id, "llm_mode": llm_mode},
+            )
             return {
                 "plan": plan,
                 "notes": [f"APPLICATION_SPEC prepared via {llm_mode} planning."],
@@ -212,6 +221,7 @@ class SampleAppAgent:
         request = state["request"]
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.generate_files_node", app_id=plan.app_id, file_count=len(plan.file_plan)):
+            emit_event(owner="sample_app", phase="generate_files", status="started", message="프로젝트 파일 생성을 시작합니다.", details={"app_id": plan.app_id})
             project_dir = Path(plan.project_dir)
             if project_dir.exists():
                 shutil.rmtree(project_dir)
@@ -227,6 +237,7 @@ class SampleAppAgent:
 
             for file_plan in plan.file_plan:
                 with timed_step(logger, "sample_app_gen.generate_file_step", path=file_plan.path):
+                    emit_event(owner="sample_app", phase="generate_file", status="progress", message="파일을 생성합니다.", details={"path": file_plan.path})
                     content = self.llm.generate_file(request, plan, file_plan, existing_files)
                     if content is None:
                         content = self._fallback_file_content(request, plan, file_plan)
@@ -235,6 +246,7 @@ class SampleAppAgent:
                     self.tools.call("execution_file_write", path=path, content=content, overwrite=True)
                     existing_files[file_plan.path] = content
                     generated_files.append(GeneratedFile(path=str(path), description=file_plan.purpose))
+            emit_event(owner="sample_app", phase="generate_files", status="completed", message="프로젝트 파일 생성이 완료되었습니다.", details={"file_count": len(generated_files)})
 
             return {
                 "existing_files": existing_files,
@@ -248,6 +260,7 @@ class SampleAppAgent:
     def _validate_files_node(self, state: SampleAppState) -> SampleAppState:
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.validate_files_node", app_id=plan.app_id):
+            emit_event(owner="sample_app", phase="validate_files", status="started", message="생성된 소스 정적 검증을 시작합니다.", details={"app_id": plan.app_id})
             project_dir = Path(plan.project_dir)
             validation = self.tools.call(
                 "code_validator",
@@ -259,6 +272,13 @@ class SampleAppAgent:
             issues: list[ValidationIssue] = validation["issues"]
 
             log_event(logger, "sample_app_gen.validate_files_node.result", issue_count=len(issues))
+            emit_event(
+                owner="sample_app",
+                phase="validate_files",
+                status="completed" if not issues else "failed",
+                message="소스 정적 검증이 완료되었습니다." if not issues else "소스 정적 검증에서 이슈가 발견되었습니다.",
+                details={"issue_count": len(issues), "issues": [item.model_dump(mode="json") for item in issues]},
+            )
             return {
                 "validation_issues": issues,
                 "executed_commands": [f"code_validator --path {project_dir}"],
@@ -277,6 +297,7 @@ class SampleAppAgent:
         request = state["request"]
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.repair_files_node", app_id=plan.app_id, repair_round=state.get("repair_round", 0) + 1):
+            emit_event(owner="sample_app", phase="repair_files", status="started", message="검증 이슈 보정을 시작합니다.", details={"repair_round": state.get("repair_round", 0) + 1})
             project_dir = Path(plan.project_dir)
             existing_files = dict(state.get("existing_files", {}))
             issues = state.get("validation_issues", [])
@@ -288,6 +309,7 @@ class SampleAppAgent:
                 if file_plan.path not in by_path:
                     continue
                 with timed_step(logger, "sample_app_gen.repair_file_step", path=file_plan.path):
+                    emit_event(owner="sample_app", phase="repair_file", status="progress", message="파일 보정을 수행합니다.", details={"path": file_plan.path})
                     current_content = existing_files.get(file_plan.path, "")
                     repaired = self.llm.repair_file(
                         request=request,
@@ -314,6 +336,7 @@ class SampleAppAgent:
         plan = state["plan"]
         with timed_step(logger, "sample_app_gen.package_artifacts_node", app_id=plan.app_id):
             request = state["request"]
+            emit_event(owner="sample_app", phase="package_artifacts", status="started", message="아티팩트 패키징과 이미지 배포를 시작합니다.", details={"app_id": plan.app_id})
             project_dir = Path(plan.project_dir)
             dist_dir = self.workspace_root / "artifacts"
             archive_base = dist_dir / plan.app_id
@@ -369,6 +392,14 @@ class SampleAppAgent:
                 notes.append("LLM generated the application plan and source files.")
             else:
                 notes.append("Azure OpenAI is not configured, so fallback generation was used.")
+
+            emit_event(
+                owner="sample_app",
+                phase="package_artifacts",
+                status="completed" if docker["ok"] else "failed",
+                message="아티팩트 패키징과 이미지 배포가 완료되었습니다." if docker["ok"] else "이미지 배포 단계에서 실패했습니다.",
+                details={"archive_path": archive_path, "image_ref": docker.get("image_ref", ""), "error_code": docker.get("error_code", "")},
+            )
 
             return {
                 "executed_commands": executed_commands,

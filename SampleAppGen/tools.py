@@ -10,6 +10,7 @@ from typing import Any, Literal, TypedDict
 
 from Supervisor.models import TargetHost, UserRequest
 from agent_logging import get_agent_logger, timed_step
+from eventing import emit_event
 
 from .models import ValidationIssue
 
@@ -67,11 +68,13 @@ class SampleAppTools:
         create_parent: bool = True,
     ) -> FileWriteResult:
         with timed_step(logger, "sample_app_gen.tools.execution_file_write", path=str(path)):
+            emit_event(owner="sample_app", phase="tool.execution_file_write", status="started", message="파일 쓰기 도구를 호출합니다.", details={"path": str(path)})
             if path.exists() and not overwrite:
                 raise FileExistsError(f"File already exists: {path}")
             if create_parent:
                 path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
+            emit_event(owner="sample_app", phase="tool.execution_file_write", status="completed", message="파일 쓰기가 완료되었습니다.", details={"path": str(path)})
             return {
                 "ok": True,
                 "written_path": str(path),
@@ -86,6 +89,7 @@ class SampleAppTools:
         framework: str,
     ) -> ValidationResult:
         with timed_step(logger, "sample_app_gen.tools.code_validator", project_dir=str(project_dir)):
+            emit_event(owner="sample_app", phase="tool.code_validator", status="started", message="코드 검증 도구를 호출합니다.", details={"project_dir": str(project_dir)})
             issues: list[ValidationIssue] = []
             for relative_path in expected_files:
                 path = project_dir / relative_path
@@ -130,15 +134,25 @@ class SampleAppTools:
                         )
                     )
 
-            return {
+            result = {
                 "ok": len(issues) == 0,
                 "issues": issues,
             }
+            emit_event(
+                owner="sample_app",
+                phase="tool.code_validator",
+                status="completed" if result["ok"] else "failed",
+                message="코드 검증 도구 실행이 완료되었습니다." if result["ok"] else "코드 검증 도구에서 오류가 발견되었습니다.",
+                details={"issue_count": len(issues)},
+            )
+            return result
 
     def build_code(self, project_dir: Path, output_base: Path) -> BuildCodeResult:
         with timed_step(logger, "sample_app_gen.tools.build_code", project_dir=str(project_dir), output_base=str(output_base)):
+            emit_event(owner="sample_app", phase="tool.build_code", status="started", message="아티팩트 패키징 도구를 호출합니다.", details={"project_dir": str(project_dir)})
             output_base.parent.mkdir(parents=True, exist_ok=True)
             archive_path = shutil.make_archive(str(output_base), "zip", root_dir=project_dir)
+            emit_event(owner="sample_app", phase="tool.build_code", status="completed", message="아티팩트 패키징이 완료되었습니다.", details={"output_path": archive_path})
             return {"ok": True, "output_path": archive_path}
 
     def docker_build(
@@ -150,6 +164,7 @@ class SampleAppTools:
         tag: str = "latest",
     ) -> DockerBuildResult:
         with timed_step(logger, "sample_app_gen.tools.docker_build", image_name=image_name, tag=tag):
+            emit_event(owner="sample_app", phase="tool.docker_build", status="started", message="Docker 이미지 빌드/전송 도구를 호출합니다.", details={"image_name": image_name, "tag": tag})
             target = request.targets[0] if request.targets else None
             image_ref = self._image_ref(image_name=image_name, tag=tag)
             archive_path = output_dir / f"{self._safe_name(image_ref)}.tar"
@@ -157,7 +172,7 @@ class SampleAppTools:
             command_label = f"docker_build --target {image_ref}"
 
             if target is None:
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -167,9 +182,11 @@ class SampleAppTools:
                     error_code="E_TARGET_MISSING",
                     stderr="No target host was provided for docker image upload.",
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 정보가 없어 이미지 전송을 시작할 수 없습니다.", details={"error_code": result["error_code"]})
+                return result
 
             if target.auth_method != "pem_path":
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -179,9 +196,11 @@ class SampleAppTools:
                     error_code="E_AUTH_UNSUPPORTED",
                     stderr=f"Unsupported auth_method for docker image upload: {target.auth_method}",
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="지원하지 않는 인증 방식으로 이미지 전송이 중단되었습니다.", details={"error_code": result["error_code"], "auth_method": target.auth_method})
+                return result
 
             if os.getenv("SAMPLE_APP_AGENT_DRY_RUN", "false").lower() != "false":
-                return {
+                result = {
                     "ok": True,
                     "image_name": image_name,
                     "tag": tag,
@@ -192,6 +211,8 @@ class SampleAppTools:
                     "stderr": "",
                     "error_code": "",
                 }
+                emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="드라이런 모드로 이미지 빌드/전송을 건너뛰었습니다.", details={"image_ref": image_ref})
+                return result
 
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -203,7 +224,7 @@ class SampleAppTools:
                 timeout=1800,
             )
             if build_result.returncode != 0:
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -213,6 +234,8 @@ class SampleAppTools:
                     error_code="E_DOCKER_BUILD",
                     stderr=build_result.stderr or build_result.stdout,
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker build가 실패했습니다.", details={"error_code": result["error_code"]})
+                return result
 
             save_result = subprocess.run(
                 ["docker", "image", "save", "-o", str(archive_path), image_ref],
@@ -222,7 +245,7 @@ class SampleAppTools:
                 timeout=1800,
             )
             if save_result.returncode != 0:
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -232,6 +255,8 @@ class SampleAppTools:
                     error_code="E_DOCKER_SAVE",
                     stderr=save_result.stderr or save_result.stdout,
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker image save가 실패했습니다.", details={"error_code": result["error_code"]})
+                return result
 
             scp_result = subprocess.run(
                 self._build_scp_command(target=target, local_path=archive_path, remote_path=remote_archive_path),
@@ -241,7 +266,7 @@ class SampleAppTools:
                 timeout=1800,
             )
             if scp_result.returncode != 0:
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -251,6 +276,8 @@ class SampleAppTools:
                     error_code="E_IMAGE_UPLOAD",
                     stderr=scp_result.stderr or scp_result.stdout,
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker 이미지 업로드가 실패했습니다.", details={"error_code": result["error_code"]})
+                return result
 
             remote_result = subprocess.run(
                 self._build_ssh_command(
@@ -263,7 +290,7 @@ class SampleAppTools:
                 timeout=1800,
             )
             if remote_result.returncode != 0:
-                return self._docker_error(
+                result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
@@ -273,8 +300,10 @@ class SampleAppTools:
                     error_code="E_DOCKER_REMOTE_LOAD",
                     stderr=remote_result.stderr or remote_result.stdout,
                 )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 docker load가 실패했습니다.", details={"error_code": result["error_code"]})
+                return result
 
-            return {
+            result = {
                 "ok": True,
                 "image_name": image_name,
                 "tag": tag,
@@ -285,6 +314,8 @@ class SampleAppTools:
                 "stderr": "",
                 "error_code": "",
             }
+            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "remote_archive_path": remote_archive_path})
+            return result
 
     def _image_ref(self, image_name: str, tag: str) -> str:
         return image_name if ":" in image_name.rsplit("/", maxsplit=1)[-1] else f"{image_name}:{tag}"
