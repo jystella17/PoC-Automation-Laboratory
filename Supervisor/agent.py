@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import operator
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Annotated, Literal, TypedDict
-from contextvars import ContextVar
 
 from langgraph.graph import END, START, StateGraph
 
 from InfraAutoSetting import InfraAutoSettingAgent
 from SampleAppGen import SampleAppAgent
 from agent_logging import get_agent_logger, log_event, timed_step
+from eventing import emit_event, reset_event_callback, set_event_callback
 
 from .config import SupervisorSettings, load_settings
 from .llm import SupervisorLLM
@@ -27,7 +26,6 @@ from .models import (
 )
 
 logger = get_agent_logger("supervisor.agent", "supervisor.log")
-_EVENT_CALLBACK: ContextVar = ContextVar("supervisor_event_callback", default=None)
 
 
 class SupervisorState(TypedDict, total=False):
@@ -132,21 +130,7 @@ class SupervisorAgent:
         message: str,
         details: dict[str, object] | None = None,
     ) -> None:
-        callback = _EVENT_CALLBACK.get()
-        if callback is None:
-            return
-        payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "owner": owner,
-            "phase": phase,
-            "status": status,
-            "message": message,
-            "details": details or {},
-        }
-        try:
-            callback(payload)
-        except Exception:  # pragma: no cover
-            return
+        emit_event(owner=owner, phase=phase, status=status, message=message, details=details)
 
     def _missing_info(self, req: UserRequest) -> list[MissingRequirement]:
         missing: list[MissingRequirement] = []
@@ -493,6 +477,7 @@ class SupervisorAgent:
 
     def _finalize_node(self, state: SupervisorState) -> SupervisorState:
         with timed_step(logger, "supervisor.finalize_node", mode=state.get("mode", "unknown")):
+            self._emit_event(owner="supervisor", phase="finalize", status="started", message="최종 응답을 정리합니다.")
             if state["blocked"]:
                 final_summary = "필수 입력값이 아직 부족해 계획 검토 단계에서 작업이 보류되었습니다."
             elif state["mode"] == "plan":
@@ -506,6 +491,7 @@ class SupervisorAgent:
                     )
                 else:
                     final_summary = "인프라 준비와 애플리케이션 생성 작업까지 전체 실행 흐름을 완료했습니다."
+            self._emit_event(owner="supervisor", phase="finalize", status="completed", message="최종 응답 정리가 완료되었습니다.", details={"final_summary": final_summary})
             return {
                 "final_summary": final_summary,
                 "execution_path": ["finalize"],
@@ -543,7 +529,7 @@ class SupervisorAgent:
             return reply, plan, run_result
 
     def run(self, req: UserRequest, event_callback=None) -> SupervisorRunResult:
-        token = _EVENT_CALLBACK.set(event_callback) if event_callback else None
+        token = set_event_callback(event_callback) if event_callback else None
         try:
             with timed_step(logger, "supervisor.run", framework=req.app_tech_stack.framework):
                 self._emit_event(
@@ -585,4 +571,4 @@ class SupervisorAgent:
                 return result
         finally:
             if token is not None:
-                _EVENT_CALLBACK.reset(token)
+                reset_event_callback(token)
