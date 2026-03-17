@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import time
 
 import streamlit as st
 
@@ -10,6 +9,7 @@ from api_client import (
     get_supervisor_run_status,
     health_check,
     start_supervisor_run,
+    stream_supervisor_run_events,
 )
 from form_logic import (
     BUILD_SYSTEM_OPTIONS,
@@ -72,6 +72,8 @@ def init_form_state() -> None:
         st.session_state.active_run_notified = False
     if "active_run_events" not in st.session_state:
         st.session_state.active_run_events = []
+    if "active_run_last_event_id" not in st.session_state:
+        st.session_state.active_run_last_event_id = 0
 
 
 def render_sidebar() -> str:
@@ -351,41 +353,58 @@ def render_active_run_progress() -> None:
             st.code(json.dumps(details, ensure_ascii=False, indent=2), language="json")
 
 
-def poll_active_run(api_url: str) -> bool:
+def consume_active_run_stream(api_url: str) -> None:
     run_id = str(st.session_state.get("active_run_id", "")).strip()
     if not run_id:
-        return False
+        return
+
+    event_placeholder = st.empty()
+    try:
+        for event_name, payload in stream_supervisor_run_events(
+            api_url,
+            run_id,
+            last_event_id=int(st.session_state.get("active_run_last_event_id", 0)),
+        ):
+            if event_name == "event":
+                event_id = int(payload.get("event_id", 0))
+                if event_id <= int(st.session_state.get("active_run_last_event_id", 0)):
+                    continue
+                st.session_state.active_run_last_event_id = event_id
+                st.session_state.active_run_events.append(payload)
+                st.session_state.active_run_status = str(payload.get("status", st.session_state.get("active_run_status", "")))
+                with event_placeholder.container():
+                    render_active_run_progress()
+            elif event_name == "done":
+                break
+    except Exception as exc:
+        st.warning(f"이벤트 스트림 연결 실패(run_id={run_id}): {exc}")
+        return
 
     try:
         run_status = get_supervisor_run_status(api_url, run_id)
     except Exception as exc:
-        st.warning(f"실행 상태 조회 실패(run_id={run_id}): {exc}")
-        return False
+        st.warning(f"최종 실행 결과 조회 실패(run_id={run_id}): {exc}")
+        return
 
     status = str(run_status.get("status", "")).strip()
     st.session_state.active_run_status = status
     events = run_status.get("events", [])
     if isinstance(events, list):
         st.session_state.active_run_events = events
-
-    if status in {"queued", "running"}:
-        st.info(f"실행 중입니다. run_id={run_id}, status={status}")
-        return True
+        if events:
+            st.session_state.active_run_last_event_id = max(int(event.get("event_id", 0)) for event in events if isinstance(event, dict))
 
     if st.session_state.active_run_notified:
-        return False
+        return
 
     if status == "succeeded":
         st.session_state.messages.append({"role": "assistant", "content": _format_run_result(run_status)})
     else:
         error = str(run_status.get("error", "unknown error")).strip()
-        st.session_state.messages.append(
-            {"role": "assistant", "content": f"실행 실패(run_id={run_id}): {error}"}
-        )
+        st.session_state.messages.append({"role": "assistant", "content": f"실행 실패(run_id={run_id}): {error}"})
 
     st.session_state.active_run_notified = True
     st.session_state.active_run_id = ""
-    return False
 
 
 def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
@@ -408,6 +427,7 @@ def handle_submit(submit: bool, api_url: str, payload: dict[str, object],
         st.session_state.active_run_status = str(enqueue.get("status", "queued"))
         st.session_state.active_run_notified = False
         st.session_state.active_run_events = []
+        st.session_state.active_run_last_event_id = 0
         reply = f"실행 요청을 접수했습니다. run_id={run_id}, status={st.session_state.active_run_status}"
     except Exception as exc:
         reply = f"Error: {exc}"
@@ -438,10 +458,7 @@ st.code(json.dumps(request_payload, indent=2), language="json")
 st.write("")
 
 handle_submit(submitted, api_url, request_payload, notices, validation_errors)
-should_refresh = poll_active_run(api_url)
+consume_active_run_stream(api_url)
 render_active_run_progress()
 render_messages()
 st.divider()
-if should_refresh:
-    time.sleep(2)
-    st.rerun()
