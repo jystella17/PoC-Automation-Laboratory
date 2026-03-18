@@ -135,6 +135,8 @@ class SupervisorAgent:
     def _missing_info(self, req: UserRequest) -> list[MissingRequirement]:
         missing: list[MissingRequirement] = []
         app_languages = [language.strip().lower() for language in req.app_tech_stack.language]
+        has_infra_request = bool(req.infra_tech_stack.components)
+        has_app_request = req.app_tech_stack.framework.strip().lower() not in {"", "none"} and req.topology.apps > 0
 
         if not req.targets:
             missing.append(
@@ -172,17 +174,17 @@ class SupervisorAgent:
                         )
                     )
 
-        if not req.infra_tech_stack.components:
+        if not has_infra_request and not has_app_request:
             missing.append(
                 MissingRequirement(
                     field="infra_tech_stack.components",
-                    question="Which infra components should be installed?",
-                    reason="The build flow needs at least one component such as Tomcat, Apache, Kafka, or Pinpoint.",
+                    question="Which infra components should be installed, or which application framework should be generated?",
+                    reason="At least one infra component or an application framework is required before execution.",
                 )
             )
 
         versions = req.infra_tech_stack.versions
-        if not versions:
+        if has_infra_request and not versions:
             missing.append(
                 MissingRequirement(
                     field="infra_tech_stack.versions",
@@ -190,7 +192,7 @@ class SupervisorAgent:
                     reason="Version selection is required to generate deterministic install steps.",
                 )
             )
-        else:
+        elif has_infra_request:
             if "tomcat" in req.infra_tech_stack.components and versions.get("tomcat", "").strip() in {"", "none"}:
                 missing.append(
                     MissingRequirement(
@@ -263,6 +265,22 @@ class SupervisorAgent:
                 detail=app_detail,
             ),
         ]
+
+    def _build_plan_steps_for_request(self, req: UserRequest, blocked: bool) -> list[PlanStep]:
+        steps = self._build_plan_steps(blocked)
+        has_infra_request = bool(req.infra_tech_stack.components)
+        has_app_request = req.app_tech_stack.framework.strip().lower() not in {"", "none"} and req.topology.apps > 0
+
+        updated_steps: list[PlanStep] = []
+        for step in steps:
+            if step.name == "build_infra" and not has_infra_request and not blocked:
+                updated_steps.append(PlanStep(name=step.name, owner=step.owner, status="completed", detail="선택된 인프라 구성요소가 없어 인프라 설치 단계는 건너뜁니다."))
+                continue
+            if step.name == "generate_app" and not has_app_request and not blocked:
+                updated_steps.append(PlanStep(name=step.name, owner=step.owner, status="completed", detail="선택된 애플리케이션 프레임워크가 없어 애플리케이션 생성 단계는 건너뜁니다."))
+                continue
+            updated_steps.append(step)
+        return updated_steps
 
     def _environment_summary(self, req: UserRequest) -> dict[str, str]:
         return {
@@ -347,7 +365,7 @@ class SupervisorAgent:
                 "missing_requirements": missing_requirements,
                 "summary": summary,
                 "environment_summary": self._environment_summary(request),
-                "steps": self._build_plan_steps(blocked),
+                "steps": self._build_plan_steps_for_request(request, blocked),
                 "execution_path": ["plan"],
             }
 
@@ -383,6 +401,17 @@ class SupervisorAgent:
     def _build_infra_node(self, state: SupervisorState) -> SupervisorState:
         request = state["request"]
         with timed_step(logger, "supervisor.build_infra_node", components=request.infra_tech_stack.components):
+            if not request.infra_tech_stack.components:
+                self._emit_event(
+                    owner="infra_build",
+                    phase="run",
+                    status="completed",
+                    message="선택된 인프라 구성요소가 없어 Infra Agent 실행을 건너뜁니다.",
+                    details={"components": []},
+                )
+                return {
+                    "execution_path": ["build_infra"],
+                }
             self._emit_event(
                 owner="infra_build",
                 phase="run",
