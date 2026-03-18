@@ -65,6 +65,8 @@ class InfraScriptGeneratorLLM(BaseLLM):
                 "- Must honor constraints.sudo_allowed\n"
                 "- Must create and chmod logging directories\n"
                 "- Use package manager aligned to target OS\n"
+                "- If request.infra_tech_stack.versions and Resolved versions JSON differ, always use Resolved versions JSON as the source of truth\n"
+                "- Never build install commands from a major-only version token when a resolved full version is provided\n"
                 f"Package manager: {package_manager}\n"
                 f"Resolved versions JSON:\n{json.dumps(resolved_versions, ensure_ascii=False, indent=2)}\n"
                 f"User request JSON:\n{request.model_dump_json(indent=2)}\n"

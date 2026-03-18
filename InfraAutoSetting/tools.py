@@ -80,7 +80,8 @@ class InfraTools:
     def code_validator(self, script_path: str, request: UserRequest) -> ValidationResult:
         with timed_step(logger, "infra_auto_setting.tools.code_validator", script_path=script_path):
             emit_event(owner="infra_build", phase="tool.code_validator", status="started", message="인프라 스크립트 검증을 시작합니다.", details={"script_path": script_path})
-            content = Path(script_path).read_text(encoding="utf-8")
+            path = Path(script_path)
+            content = path.read_text(encoding="utf-8")
             issues: list[ValidationIssue] = []
 
             if "set -euo pipefail" not in content:
