@@ -186,7 +186,13 @@ def render_form() -> tuple[bool, dict[str, object]]:
             step=1,
             key="pinpoint_agent_instance",
         )
-        sudo_allowed = st.selectbox("sudo 정책", ["limited", "yes", "no"], index=0)
+        sudo_allowed = st.selectbox(
+            "sudo 권한",
+            ["yes", "no"],
+            index=0,
+            format_func=lambda value: "sudo 권한 허용" if value == "yes" else "sudo 권한 비허용",
+            help="패키지 설치, systemd 서비스 등록, `/var` 로그 디렉터리 생성이 필요하면 sudo 권한을 허용해야 합니다.",
+        )
         no_public_upload = st.checkbox("외부 공개 업로드 차단", value=True)
 
     with app_col:
@@ -233,9 +239,21 @@ def render_form() -> tuple[bool, dict[str, object]]:
             value=False,
             help="허용 시 Agent가 SSH를 통해 host 방화벽(ufw/firewalld/iptables) 또는 보안그룹 변경 절차를 수행할 수 있습니다.",
         )
-        base_dir = st.text_input("기본 로그 경로", value="/var/log/infra-test-lab")
-        gc_log_dir = st.text_input("GC 로그 경로", value="/var/log/infra-test-lab/gc")
-        app_log_dir = st.text_input("애플리케이션 로그 경로", value="/var/log/infra-test-lab/app")
+        base_dir = st.text_input(
+            "기본 로그 경로",
+            value="/var/log/infra-test-lab",
+            help="`sudo_allowed=yes`가 아니면 사용자 홈 하위 경로를 사용하는 편이 안전합니다.",
+        )
+        gc_log_dir = st.text_input(
+            "GC 로그 경로",
+            value="/var/log/infra-test-lab/gc",
+            help="예: `/home/ec2-user/infra-test-lab/gc`",
+        )
+        app_log_dir = st.text_input(
+            "애플리케이션 로그 경로",
+            value="/var/log/infra-test-lab/app",
+            help="예: `/home/ec2-user/infra-test-lab/app`",
+        )
 
     with load_col:
         tps = st.number_input("TPS", min_value=0, value=5000, step=100)

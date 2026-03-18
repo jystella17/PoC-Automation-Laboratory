@@ -58,6 +58,26 @@ def derive_java_version(languages: str | list[str]) -> str:
     return ""
 
 
+def requires_privileged_install(form_values: dict[str, Any]) -> bool:
+    components = form_values.get("components", [])
+    normalized_components = {normalize_component_name(component) for component in components}
+    framework = str(form_values.get(FRAMEWORK_RULE["framework_key"], FRAMEWORK_RULE["none_value"])).strip()
+    database = str(form_values.get(DATABASE_RULE["database_key"], DATABASE_RULE["none_value"])).strip()
+    java_version = derive_java_version(form_values.get("language", []))
+
+    return bool(normalized_components or framework != FRAMEWORK_RULE["none_value"] or database != DATABASE_RULE["none_value"] or java_version)
+
+
+def requires_privileged_log_paths(form_values: dict[str, Any]) -> bool:
+    protected_prefixes = ("/var/", "/etc/", "/usr/", "/opt/")
+    paths = (
+        str(form_values.get("base_dir", "")).strip(),
+        str(form_values.get("gc_log_dir", "")).strip(),
+        str(form_values.get("app_log_dir", "")).strip(),
+    )
+    return any(path == prefix[:-1] or path.startswith(prefix) for path in paths for prefix in protected_prefixes)
+
+
 def sanitize_component_fields(form_values: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
     sanitized = dict(form_values)
     notices: list[str] = []
@@ -176,6 +196,23 @@ def validate_database_selection(form_values: dict[str, Any]) -> list[str]:
     return errors
 
 
+def validate_privilege_requirements(form_values: dict[str, Any]) -> list[str]:
+    errors: list[str] = []
+    sudo_allowed = str(form_values.get("sudo_allowed", "")).strip()
+
+    if sudo_allowed != "yes" and requires_privileged_install(form_values):
+        errors.append(
+            "현재 선택한 인프라/애플리케이션 설치 작업은 패키지 설치와 서비스 등록이 포함되어 sudo 권한 허용이 필요합니다."
+        )
+
+    if sudo_allowed != "yes" and requires_privileged_log_paths(form_values):
+        errors.append(
+            "로그 경로가 `/var`, `/etc`, `/usr`, `/opt` 하위이면 디렉터리 생성과 권한 설정에 sudo 권한 허용이 필요합니다."
+        )
+
+    return errors
+
+
 def apply_form_rules(form_values: dict[str, Any]) -> tuple[dict[str, Any], list[str], list[str]]:
     notices: list[str] = []
     sanitized, component_notices = sanitize_component_fields(form_values)
@@ -191,6 +228,7 @@ def apply_form_rules(form_values: dict[str, Any]) -> tuple[dict[str, Any], list[
     errors.extend(validate_framework_selection(sanitized))
     errors.extend(validate_target_fields(sanitized))
     errors.extend(validate_database_selection(sanitized))
+    errors.extend(validate_privilege_requirements(sanitized))
 
     return sanitized, notices, errors
 
