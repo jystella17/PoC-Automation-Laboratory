@@ -28,7 +28,23 @@ export AZURE_OPENAI_API_VERSION="2024-02-01"
 uvicorn apps.supervisor_api:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-### 4) Streamlit UI 실행
+### 4) Redis 실행
+```bash
+redis-server
+```
+
+기본 연결 주소는 `redis://127.0.0.1:6379/0` 이며, 필요하면 아래 환경변수로 변경한다.
+
+```bash
+export SUPERVISOR_REDIS_URL="redis://127.0.0.1:6379/0"
+```
+
+### 5) Celery Worker 실행
+```bash
+celery -A apps.celery_app.celery_app worker --loglevel=info
+```
+
+### 6) Streamlit UI 실행
 ```bash
 streamlit run ui/chat_ui.py
 ```
@@ -38,8 +54,12 @@ streamlit run ui/chat_ui.py
 - `GET /v1/supervisor/graph`
 - `POST /v1/supervisor/plan`
 - `POST /v1/supervisor/run`
+- `POST /v1/supervisor/run-async`
+- `GET /v1/supervisor/run-async/{run_id}`
+- `GET /v1/supervisor/run-async/{run_id}/events`
 - `POST /v1/chat`
 
 ### Supervisor 구현 메모
 - `Supervisor/agent.py`는 `LangGraph` 상태 그래프로 `plan -> dispatch -> build_infra/generate_app -> finalize` 흐름을 정의한다.
 - 그래프 시각화 정보는 `BuildPlan.graph`, `SupervisorRunResult.graph`, `GET /v1/supervisor/graph`에서 확인할 수 있다.
+- 비동기 실행은 `Celery + Redis` 기반이며, 각 Agent 단계/Tool 호출 이벤트는 Redis에 저장되고 SSE로 UI에 실시간 전달된다.
