@@ -4,6 +4,7 @@ import operator
 import re
 import shutil
 from pathlib import Path
+from string import Template
 from typing import Annotated, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -27,6 +28,7 @@ from .models import (
 from .tools import SampleAppTools
 
 logger = get_agent_logger("sample_app_gen.agent", "sample_app_gen.log")
+TEMPLATE_DIR = Path(__file__).resolve().parent
 
 
 class UnsupportedStackError(Exception):
@@ -203,6 +205,7 @@ class SampleAppAgent:
                 plan = self._fallback_plan(request=request, project_dir=project_dir, app_id=app_id, language=primary_language)
                 llm_mode = "fallback"
             else:
+                plan = self._normalize_plan(plan, request=request, project_dir=project_dir, app_id=app_id)
                 llm_mode = "llm"
             log_event(logger, "sample_app_gen.plan_spec_node.result", app_id=plan.app_id, llm_mode=llm_mode)
             emit_event(
@@ -238,10 +241,14 @@ class SampleAppAgent:
             for file_plan in plan.file_plan:
                 with timed_step(logger, "sample_app_gen.generate_file_step", path=file_plan.path):
                     emit_event(owner="sample_app", phase="generate_file", status="progress", message="파일을 생성합니다.", details={"path": file_plan.path})
-                    content = self.llm.generate_file(request, plan, file_plan, existing_files)
+                    content = self._deterministic_file_content(request, plan, file_plan)
                     if content is None:
-                        content = self._fallback_file_content(request, plan, file_plan)
-                        log_event(logger, "sample_app_gen.generate_file_step.fallback", path=file_plan.path)
+                        content = self.llm.generate_file(request, plan, file_plan, existing_files)
+                        if content is None:
+                            content = self._fallback_file_content(request, plan, file_plan)
+                            log_event(logger, "sample_app_gen.generate_file_step.fallback", path=file_plan.path)
+                    else:
+                        log_event(logger, "sample_app_gen.generate_file_step.template", path=file_plan.path)
                     path = project_dir / file_plan.path
                     self.tools.call("execution_file_write", path=path, content=content, overwrite=True)
                     existing_files[file_plan.path] = content
@@ -310,18 +317,22 @@ class SampleAppAgent:
                     continue
                 with timed_step(logger, "sample_app_gen.repair_file_step", path=file_plan.path):
                     emit_event(owner="sample_app", phase="repair_file", status="progress", message="파일 보정을 수행합니다.", details={"path": file_plan.path})
-                    current_content = existing_files.get(file_plan.path, "")
-                    repaired = self.llm.repair_file(
-                        request=request,
-                        plan=plan,
-                        file_plan=file_plan,
-                        current_content=current_content,
-                        issues=by_path[file_plan.path],
-                        existing_files=existing_files,
-                    )
+                    repaired = self._deterministic_file_content(request, plan, file_plan)
                     if repaired is None:
-                        repaired = self._fallback_file_content(request, plan, file_plan)
-                        log_event(logger, "sample_app_gen.repair_file_step.fallback", path=file_plan.path)
+                        current_content = existing_files.get(file_plan.path, "")
+                        repaired = self.llm.repair_file(
+                            request=request,
+                            plan=plan,
+                            file_plan=file_plan,
+                            current_content=current_content,
+                            issues=by_path[file_plan.path],
+                            existing_files=existing_files,
+                        )
+                        if repaired is None:
+                            repaired = self._fallback_file_content(request, plan, file_plan)
+                            log_event(logger, "sample_app_gen.repair_file_step.fallback", path=file_plan.path)
+                    else:
+                        log_event(logger, "sample_app_gen.repair_file_step.template", path=file_plan.path)
                     path = project_dir / file_plan.path
                     self.tools.call("execution_file_write", path=path, content=repaired, overwrite=True)
                     existing_files[file_plan.path] = repaired
@@ -454,6 +465,30 @@ class SampleAppAgent:
             spec_markdown=self._fallback_spec_markdown(request, framework, language, app_id, file_plan, build_system),
         )
 
+    def _normalize_plan(self, plan: ApplicationPlan, request: UserRequest, project_dir: Path, app_id: str) -> ApplicationPlan:
+        language = self._resolve_language(plan.framework, [plan.language] if plan.language else [])
+        is_java = language.lower().startswith("java")
+        build_system = self._resolve_build_system(request=request, framework=plan.framework)
+        runtime_version = plan.runtime_version or self._runtime_version(language) or ("17" if is_java else "3.12")
+        file_plan = list(plan.file_plan) if plan.file_plan else self._fallback_file_plan(plan.framework, build_system=build_system)
+        dockerfile_present = any(item.path == "Dockerfile" for item in file_plan)
+        if not dockerfile_present:
+            file_plan.append(ApplicationFilePlan(path="Dockerfile", purpose="Container build file", language="dockerfile"))
+
+        normalized_artifact_name = f"{app_id}.jar" if is_java else f"{app_id}.zip"
+        return plan.model_copy(
+            update={
+                "app_id": app_id,
+                "language": language,
+                "build_system": build_system,
+                "runtime_version": runtime_version,
+                "artifact_type": "jar" if is_java else "zip",
+                "artifact_name": normalized_artifact_name,
+                "project_dir": str(project_dir),
+                "file_plan": file_plan,
+            }
+        )
+
     def _fallback_file_plan(self, framework: str, build_system: str = "maven") -> list[ApplicationFilePlan]:
         if framework.strip().lower() == "fastapi":
             return [
@@ -489,16 +524,9 @@ class SampleAppAgent:
         if path == ".env.example":
             return "\n".join(self._required_env(request) + [f"APP_LOG_DIR={plan.log_dir}"]) + "\n"
         if path == "Dockerfile":
-            if plan.framework.lower() == "fastapi":
-                return (
-                    f"FROM python:{plan.runtime_version or '3.12'}-slim\n\n"
-                    "WORKDIR /app\nCOPY requirements.txt .\nRUN pip install --no-cache-dir -r requirements.txt\n"
-                    "COPY app ./app\nEXPOSE 8000\nCMD [\"uvicorn\", \"app.main:app\", \"--host\", \"0.0.0.0\", \"--port\", \"8000\"]\n"
-                )
-            return (
-                f"FROM eclipse-temurin:{plan.runtime_version or '17'}-jre\n\n"
-                "WORKDIR /app\nCOPY target/*.jar app.jar\nEXPOSE 8080\nENTRYPOINT [\"java\", \"-jar\", \"/app/app.jar\"]\n"
-            )
+            deterministic = self._deterministic_file_content(request, plan, file_plan)
+            if deterministic is not None:
+                return deterministic
         if path == "README.md":
             return f"# Generated Sample App\n\n- framework: {plan.framework}\n- language: {plan.language}\n"
         if path == "app/main.py":
@@ -538,6 +566,35 @@ class SampleAppAgent:
         if path.endswith("application.yml"):
             return f"server:\n  port: 8080\nlogging:\n  file:\n    name: {plan.log_dir}/application.log\n"
         return ""
+
+    def _deterministic_file_content(
+        self,
+        request: UserRequest,
+        plan: ApplicationPlan,
+        file_plan: ApplicationFilePlan,
+    ) -> str | None:
+        if file_plan.path != "Dockerfile":
+            return None
+        return self._render_dockerfile_template(plan)
+
+    def _render_dockerfile_template(self, plan: ApplicationPlan) -> str:
+        framework = plan.framework.strip().lower()
+        if framework == "fastapi":
+            template_path = TEMPLATE_DIR / "docker_template_python_fastapi.tmpl"
+            return self._load_template(template_path).substitute(
+                PYTHON_VERSION=plan.runtime_version or "3.12"
+            ) + "\n"
+
+        template_name = "docker_template_java_gradle.tmpl" if plan.build_system == "gradle" else "docker_template_java_maven.tmpl"
+        template_path = TEMPLATE_DIR / template_name
+        artifact_name = plan.artifact_name if plan.artifact_name.endswith(".jar") else f"{plan.app_id}.jar"
+        return self._load_template(template_path).substitute(
+            JAVA_VERSION=plan.runtime_version or "17",
+            ARTIFACT_NAME=artifact_name,
+        ) + "\n"
+
+    def _load_template(self, path: Path) -> Template:
+        return Template(path.read_text(encoding="utf-8"))
 
     def _fallback_fastapi_main(self, request: UserRequest, plan: ApplicationPlan) -> str:
         leak_block = ""

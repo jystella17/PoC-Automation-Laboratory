@@ -108,6 +108,9 @@ class SampleAppTools:
             if normalized == "fastapi":
                 if "app/main.py" not in existing_files:
                     issues.append(ValidationIssue(path="app/main.py", message="FastAPI entrypoint is required."))
+                dockerfile = existing_files.get("Dockerfile", "")
+                if dockerfile and "uvicorn" not in dockerfile:
+                    issues.append(ValidationIssue(path="Dockerfile", message="FastAPI Dockerfile must run uvicorn."))
             elif normalized in {"spring", "spring boot"}:
                 has_pom = any(Path(path).name == "pom.xml" for path in existing_files)
                 has_gradle = any(Path(path).name in {"build.gradle", "build.gradle.kts"} for path in existing_files)
@@ -133,6 +136,22 @@ class SampleAppTools:
                             message="Spring boot entrypoint is required.",
                         )
                     )
+                dockerfile = existing_files.get("Dockerfile", "")
+                if dockerfile:
+                    if 'ENTRYPOINT ["java", "-jar"' not in dockerfile:
+                        issues.append(
+                            ValidationIssue(
+                                path="Dockerfile",
+                                message='Spring Dockerfile must use ENTRYPOINT ["java", "-jar", "..."].',
+                            )
+                        )
+                    if 'ENTRYPOINT ["sh", "-c"' in dockerfile or 'CMD ["sh", "-c"' in dockerfile:
+                        issues.append(
+                            ValidationIssue(
+                                path="Dockerfile",
+                                message="Spring Dockerfile must not use shell-form sh -c entrypoints.",
+                            )
+                        )
 
             result = {
                 "ok": len(issues) == 0,

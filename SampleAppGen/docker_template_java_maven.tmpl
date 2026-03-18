@@ -1,0 +1,13 @@
+FROM maven:3.9.9-eclipse-temurin-${JAVA_VERSION} AS builder
+
+WORKDIR /workspace
+COPY pom.xml ./
+COPY src ./src
+RUN mvn -q -DskipTests package && cp target/*.jar /tmp/app.jar
+
+FROM eclipse-temurin:${JAVA_VERSION}-jre
+
+WORKDIR /app
+COPY --from=builder /tmp/app.jar /app/${ARTIFACT_NAME}
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/${ARTIFACT_NAME}"]
