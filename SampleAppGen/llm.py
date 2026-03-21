@@ -8,6 +8,7 @@ from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
 from base_llm import BaseLLM
+from shared.utils import extract_prior_notes
 
 from .models import ApplicationFilePlan, ApplicationPlan, ValidationIssue
 
@@ -39,7 +40,7 @@ class SampleAppGeneratorLLM(BaseLLM):
                 log_event(logger, "sample_app_gen.llm.plan_application.skipped", reason="llm_not_available")
                 return None
 
-            infra_notes = self._infra_notes(prior_executions)
+            infra_notes = extract_prior_notes(prior_executions, agent_filter="infra_build")
             human_prompt = (
                 "Return JSON only.\n"
                 "Create an application generation plan for a sample app.\n"
@@ -193,10 +194,3 @@ class SampleAppGeneratorLLM(BaseLLM):
             chunks.append(f"FILE: {path}\n{preview}")
         return "\n\n".join(chunks)
 
-    def _infra_notes(self, prior_executions: list[AgentExecution]) -> str:
-        notes: list[str] = []
-        for execution in prior_executions:
-            if execution.agent != "infra_build":
-                continue
-            notes.extend(execution.notes)
-        return "\n".join(notes) or "none"

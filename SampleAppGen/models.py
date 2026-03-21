@@ -5,6 +5,7 @@ from typing import List, Literal
 from pydantic import BaseModel, Field
 
 from Supervisor.models import AgentExecution, GraphEdge, GraphNode, GraphView
+from shared.graph_utils import generate_mermaid
 
 
 class ApplicationFilePlan(BaseModel):
@@ -76,17 +77,4 @@ GRAPH_EDGES = [
     GraphEdge(source="finalize", target="END"),
 ]
 
-GRAPH_MERMAID = "\n".join(
-    [
-        "graph TD",
-        "    START([Start]) --> plan_spec[Plan Spec]",
-        "    plan_spec --> generate_files[Generate Files]",
-        "    generate_files --> validate_files{Validate Files}",
-        "    validate_files -->|valid| package_artifacts[Package Artifacts]",
-        "    validate_files -->|repair| repair_files[Repair Files]",
-        "    validate_files -->|failed| finalize[Finalize Result]",
-        "    repair_files --> validate_files",
-        "    package_artifacts --> finalize",
-        "    finalize --> END([End])",
-    ]
-)
+GRAPH_MERMAID = generate_mermaid(GRAPH_NODES, GRAPH_EDGES)
