@@ -5,6 +5,7 @@ from typing import List
 from pydantic import BaseModel, Field
 
 from Supervisor.models import AgentExecution, GraphEdge, GraphNode, GraphView
+from shared.graph_utils import generate_mermaid
 
 
 class InfraScriptArtifact(BaseModel):
@@ -41,15 +42,4 @@ GRAPH_EDGES = [
     GraphEdge(source="finalize", target="END"),
 ]
 
-GRAPH_MERMAID = "\n".join(
-    [
-        "graph TD",
-        "    START([Start]) --> plan_script[Plan Script]",
-        "    plan_script --> write_script[Write Script]",
-        "    write_script --> validate_script{Validate Script}",
-        "    validate_script -->|valid| run_remote[Run Remote]",
-        "    validate_script -->|invalid| finalize[Finalize Result]",
-        "    run_remote --> finalize",
-        "    finalize --> END([End])",
-    ]
-)
+GRAPH_MERMAID = generate_mermaid(GRAPH_NODES, GRAPH_EDGES)

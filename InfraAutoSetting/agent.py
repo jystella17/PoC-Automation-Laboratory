@@ -6,24 +6,18 @@ import shlex
 import tempfile
 from pathlib import Path
 
+from config.versions import VERSION_CATALOG
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, GraphView, TargetHost, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
 from eventing import emit_event
+from shared.utils import extract_prior_notes
 
 from .llm import InfraScriptGeneratorLLM
 from .models import GRAPH_EDGES, GRAPH_MERMAID, GRAPH_NODES, InfraBuildRunResult, InfraScriptArtifact
 from .tools import InfraTools, ValidationIssue
 
 logger = get_agent_logger("infra_auto_setting.agent", "infra_auto_setting.log")
-
-VERSION_CATALOG: dict[str, list[str]] = {
-    "apache": ["2.4.66", "2.4.65"],
-    "tomcat": ["10.1.36", "10.1.35", "9.0.95"],
-    "kafka": ["3.6.2", "3.6.1", "3.5.2"],
-    "java": ["21.0.4", "17.0.12"],
-    "pinpoint": ["Pinpoint v3", "Pinpoint v2"],
-}
 
 DEFAULT_GENERATED_OUTPUTS = [
     "infra bootstrap script",
@@ -232,7 +226,7 @@ class InfraAutoSettingAgent:
 
         if not candidates:
             return requested
-        return sorted(candidates, key=self._version_sort_key, reverse=True)[0]
+        return max(candidates, key=self._version_sort_key)
 
     def _version_sort_key(self, value: str) -> tuple[int, int, int]:
         match = re.search(r"\d+(?:\.\d+){0,2}", value)
@@ -252,20 +246,21 @@ class InfraAutoSettingAgent:
         return target_dir / f"infra_bootstrap_{safe_host}.sh"
 
     def _build_script(self, request: UserRequest, versions: dict[str, str], prior_executions: list[AgentExecution]) -> str:
-        fallback_script = self._build_script_fallback(request, versions, prior_executions)
+        package_manager = self._resolve_package_manager(request)
+        fallback_script = self._build_script_fallback(request, versions, prior_executions, package_manager)
         script = fallback_script
         script = self._sanitize_generated_script(
             script=script,
             request=request,
             resolved_versions=versions,
-            package_manager=self._resolve_package_manager(request),
+            package_manager=package_manager,
         )
         script = self._enforce_logging_directory_policy(script=script, request=request)
         return self._enforce_java_runtime_policy(
             script=script,
             request=request,
             resolved_versions=versions,
-            package_manager=self._resolve_package_manager(request),
+            package_manager=package_manager,
         )
 
     def _build_script_fallback(
@@ -273,8 +268,8 @@ class InfraAutoSettingAgent:
         request: UserRequest,
         versions: dict[str, str],
         prior_executions: list[AgentExecution],
+        package_manager: str,
     ) -> str:
-        package_manager = self._resolve_package_manager(request)
         lines = [
             "#!/usr/bin/env bash",
             "set -euo pipefail",
@@ -345,12 +340,10 @@ class InfraAutoSettingAgent:
         return [f"echo 'unsupported component: {component} (skipped)'"]
 
     def _sample_app_notes(self, prior_executions: list[AgentExecution]) -> list[str]:
-        output: list[str] = []
-        for execution in prior_executions:
-            if execution.agent != "sample_app":
-                continue
-            output.extend(note.strip() for note in execution.notes if note.strip())
-        return output[:10]
+        merged = extract_prior_notes(prior_executions, agent_filter="sample_app")
+        if merged == "none":
+            return []
+        return merged.splitlines()[:10]
 
     def _enforce_java_runtime_policy(
         self,

@@ -7,6 +7,7 @@ from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, UserRequest
 from agent_logging import get_agent_logger, log_event, timed_step
 from base_llm import BaseLLM
+from shared.utils import extract_prior_notes
 
 SYSTEM_PROMPT = """You are a senior infrastructure automation engineer.
 Generate safe, idempotent Linux shell scripts for infra setup based on the request.
@@ -55,7 +56,7 @@ class InfraScriptGeneratorLLM(BaseLLM):
                 log_event(logger, "infra_auto_setting.llm.generate_install_script.skipped", reason="llm_not_available")
                 return None
 
-            prior_notes = self._prior_notes(prior_executions)
+            prior_notes = extract_prior_notes(prior_executions)
             human_prompt = (
                 "Return only raw bash script content. No markdown fences.\n"
                 "Generate a full infra bootstrap script for the target host.\n"
@@ -107,13 +108,3 @@ class InfraScriptGeneratorLLM(BaseLLM):
             return False
         return True
 
-    def _prior_notes(self, prior_executions: list[AgentExecution]) -> str:
-        notes: list[str] = []
-        for execution in prior_executions:
-            notes.extend(execution.notes)
-        merged = "\n".join(note for note in notes if note.strip())
-        if not merged:
-            return "none"
-        if len(merged) > 3000:
-            return merged[:3000] + "\n...truncated..."
-        return merged

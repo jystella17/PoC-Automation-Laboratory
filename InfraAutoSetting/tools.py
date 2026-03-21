@@ -1,24 +1,16 @@
 from __future__ import annotations
 
-import os
 import re
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, TypedDict
 
 from Supervisor.models import TargetHost, UserRequest
 from agent_logging import get_agent_logger, timed_step
 from eventing import emit_event
+from shared.base_tools import BaseTools, FileWriteResult
 
 logger = get_agent_logger("infra_auto_setting.tools", "infra_auto_setting.log")
-
-ToolName = Literal["execution_file_write", "code_validator", "ssh"]
-
-
-class FileWriteResult(TypedDict):
-    ok: bool
-    written_path: str
-    bytes_written: int
 
 
 class ValidationIssue(TypedDict):
@@ -42,40 +34,15 @@ class RemoteExecutionResult(TypedDict):
     timed_out: bool
 
 
-class InfraTools:
+class InfraTools(BaseTools):
     def __init__(self, dry_run: bool = False):
+        super().__init__(owner="infra_build", log_label="infra_auto_setting", logger=logger)
         self.dry_run = dry_run
-        self._handlers: dict[ToolName, Any] = {
+        self._handlers.update({
             "execution_file_write": self.execution_file_write,
             "code_validator": self.code_validator,
             "ssh": self.ssh,
-        }
-
-    def call(self, tool_name: ToolName, **kwargs: Any) -> Any:
-        handler = self._handlers[tool_name]
-        return handler(**kwargs)
-
-    def execution_file_write(
-        self,
-        path: Path,
-        content: str,
-        overwrite: bool = True,
-        chmod: str | None = None,
-    ) -> FileWriteResult:
-        with timed_step(logger, "infra_auto_setting.tools.execution_file_write", path=str(path)):
-            emit_event(owner="infra_build", phase="tool.execution_file_write", status="started", message="인프라 스크립트 파일을 생성합니다.", details={"path": str(path)})
-            if path.exists() and not overwrite:
-                raise FileExistsError(f"File already exists: {path}")
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
-            if chmod:
-                path.chmod(int(chmod, 8))
-            emit_event(owner="infra_build", phase="tool.execution_file_write", status="completed", message="인프라 스크립트 파일 생성이 완료되었습니다.", details={"path": str(path)})
-            return {
-                "ok": True,
-                "written_path": str(path),
-                "bytes_written": len(content.encode("utf-8")),
-            }
+        })
 
     def code_validator(self, script_path: str, request: UserRequest) -> ValidationResult:
         with timed_step(logger, "infra_auto_setting.tools.code_validator", script_path=script_path):
@@ -196,28 +163,6 @@ class InfraTools:
         }
         emit_event(owner="infra_build", phase="tool.ssh", status="completed", message="원격 인프라 적용이 완료되었습니다.", details={"host": target.host})
         return result
-
-    def _build_ssh_command(self, target: TargetHost) -> list[str]:
-        strict_host_key_checking = os.getenv("SSH_STRICT_HOST_KEY_CHECKING", "accept-new").strip() or "accept-new"
-        user_known_hosts_file = os.getenv("SSH_USER_KNOWN_HOSTS_FILE", "").strip()
-        if not user_known_hosts_file:
-            user_known_hosts_file = str(Path.home() / ".ssh" / "known_hosts")
-
-        base = [
-            "ssh",
-            "-o",
-            f"StrictHostKeyChecking={strict_host_key_checking}",
-            "-o",
-            f"UserKnownHostsFile={user_known_hosts_file}",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=15",
-        ]
-        if target.auth_method == "pem_path":
-            base += ["-i", target.auth_ref]
-        base += ["-p", str(target.ssh_port), f"{target.user}@{target.host}", "bash -s"]
-        return base
 
     def _remote_error(
         self,
