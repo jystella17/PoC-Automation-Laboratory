@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from config.versions import COMPONENT_VERSION_OPTIONS
+
 COMPONENT_OPTIONS = ["Apache", "Tomcat", "Kafka", "Pinpoint", "Others"]
 OS_OPTIONS = ["Linux", "Windows"]
 TARGET_OS_OPTIONS = ["Ubuntu22.04", "Rhel9", "Amazon Linux2023", "Debian12"]
@@ -24,12 +26,6 @@ COMPONENT_RULES = {
     "tomcat": {"version_key": "tomcat_version", "instance_key": "tomcat_instance", "none_value": "None"},
     "kafka": {"version_key": "kafka_version", "instance_key": "kafka_consumer_instance", "none_value": "None"},
     "pinpoint": {"version_key": "pinpoint_version", "instance_key": "pinpoint_agent_instance", "none_value": "None"},
-}
-COMPONENT_VERSION_OPTIONS = {
-    "apache": ["None", "2.4.66", "2.4.65"],
-    "tomcat": ["None", "10", "9"],
-    "kafka": ["None", "3.6", "3.5"],
-    "pinpoint": ["None", "Pinpoint v3", "Pinpoint v2"],
 }
 FRAMEWORK_RULE = {
     "framework_key": "framework",
