@@ -9,6 +9,8 @@ from typing import Any, AsyncIterator
 from redis import Redis
 from redis.asyncio import Redis as AsyncRedis
 
+from shared.utils import now_iso
+
 
 def redis_url() -> str:
     return os.getenv("SUPERVISOR_REDIS_URL", "redis://127.0.0.1:6379/0")
@@ -68,12 +70,12 @@ class RunEventStore:
         self.update_run(
             run_id,
             status=status,
-            finished_at=_now_iso(),
+            finished_at=now_iso(),
             result=json.dumps(result, ensure_ascii=False),
         )
 
     def set_error(self, run_id: str, error: str) -> None:
-        self.update_run(run_id, status="failed", finished_at=_now_iso(), error=error)
+        self.update_run(run_id, status="failed", finished_at=now_iso(), error=error)
 
     def get_run(self, run_id: str) -> dict[str, Any] | None:
         data = self.redis.hgetall(self._job_key(run_id))
@@ -91,7 +93,7 @@ class RunEventStore:
         return result
 
     def get_events(self, run_id: str, after_event_id: int = 0) -> list[dict[str, Any]]:
-        items = self.redis.lrange(self._events_key(run_id), 0, -1)
+        items = self.redis.lrange(self._events_key(run_id), after_event_id, -1)
         events: list[dict[str, Any]] = []
         for item in items:
             try:
@@ -127,7 +129,7 @@ class AsyncRunEventStore:
         return data
 
     async def replay_events(self, run_id: str, after_event_id: int = 0) -> list[dict[str, Any]]:
-        items = await self.redis.lrange(f"supervisor:run:{run_id}:events", 0, -1)
+        items = await self.redis.lrange(f"supervisor:run:{run_id}:events", after_event_id, -1)
         events: list[dict[str, Any]] = []
         for item in items:
             try:
@@ -178,8 +180,3 @@ class AsyncRunEventStore:
                     break
                 await asyncio.sleep(0.1)
 
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
