@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+##############################################################################
+# Wrapper script for executing a Gradle build.
+##############################################################################
+
+cygwin=false
+msys=false
+darwin=false
+case "$(uname -s)" in
+  CYGWIN* ) cygwin=true ;;
+  MINGW*|MSYS* ) msys=true ;;
+  Darwin* ) darwin=true ;;
+esac
+
+PRG="$0"
+while [ -h "$PRG" ]; do
+  ls=$(ls -ld "$PRG")
+  link=$(expr "$ls" : '.*-> \(.*\)$')
+  if expr "$link" : '/.*' > /dev/null; then
+    PRG="$link"
+  else
+    PRG="$(dirname "$PRG")/$link"
+  fi
+done
+
+PRGDIR="$(dirname "$PRG")"
+if [ -n "$PRGDIR" ]; then
+  APP_HOME=$(cd "$PRGDIR" && pwd)
+else
+  APP_HOME=$(pwd)
+fi
+
+if [ -n "$JAVA_HOME" ]; then
+  JAVA_CMD="$JAVA_HOME/bin/java"
+else
+  JAVA_CMD="java"
+fi
+
+DEFAULT_JAVA_OPTS="-Xms128m -Xmx1g -Dfile.encoding=UTF-8"
+JAVA_OPTS="${JAVA_OPTS:-$DEFAULT_JAVA_OPTS}"
+
+WRAPPER_JAR="$APP_HOME/gradle/wrapper/gradle-wrapper.jar"
+WRAPPER_PROPERTIES="$APP_HOME/gradle/wrapper/gradle-wrapper.properties"
+
+if [ ! -f "$WRAPPER_JAR" ]; then
+  echo "ERROR: Gradle wrapper jar not found: $WRAPPER_JAR" 1>&2
+  echo "Run 'gradle wrapper' to generate the required wrapper files." 1>&2
+  exit 1
+fi
+
+if [ ! -f "$WRAPPER_PROPERTIES" ]; then
+  echo "ERROR: Gradle wrapper properties not found: $WRAPPER_PROPERTIES" 1>&2
+  exit 1
+fi
+
+CLASSPATH="$WRAPPER_JAR"
+exec "$JAVA_CMD" $JAVA_OPTS -classpath "$CLASSPATH" org.gradle.wrapper.GradleWrapperMain "$@"

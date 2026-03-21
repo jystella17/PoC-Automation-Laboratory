@@ -33,6 +33,8 @@ class ValidationResult(TypedDict):
 class BuildCodeResult(TypedDict):
     ok: bool
     output_path: str
+    stderr: str
+    error_code: str
 
 
 class DockerBuildResult(TypedDict):
@@ -123,19 +125,59 @@ class SampleAppTools:
                     )
 
                 # Validate by semantic markers instead of hard-coded package/file path.
-                has_spring_entrypoint = any(
-                    path.endswith(".java")
-                    and "@SpringBootApplication" in content
-                    and "SpringApplication.run(" in content
+                spring_entrypoints = [
+                    path
                     for path, content in existing_files.items()
-                )
+                    if path.endswith(".java")
+                    and "@SpringBootApplication" in content
+                    and "main(String[] args)" in content
+                    and ("SpringApplication.run(" in content or "new SpringApplication(" in content)
+                ]
+                has_spring_entrypoint = bool(spring_entrypoints)
+                if len(spring_entrypoints) > 1:
+                    for path in spring_entrypoints:
+                        issues.append(
+                            ValidationIssue(
+                                path=path,
+                                message="Multiple Spring Boot entrypoints detected. Only one @SpringBootApplication class should be generated.",
+                            )
+                        )
+
                 if not has_spring_entrypoint:
                     issues.append(
                         ValidationIssue(
-                            path="src/main/java/**/Application.java",
+                            path="src/main/java/**",
                             message="Spring boot entrypoint is required.",
                         )
                     )
+
+                build_descriptor = existing_files.get("build.gradle", "") + "\n" + existing_files.get("pom.xml", "")
+                if "jakarta.validation" in "\n".join(existing_files.values()) and "spring-boot-starter-validation" not in build_descriptor:
+                    issues.append(
+                        ValidationIssue(
+                            path="build.gradle|pom.xml",
+                            message="Jakarta validation usage requires spring-boot-starter-validation.",
+                        )
+                    )
+                board_required_files = {
+                    "src/main/java/com/example/board/model/Post.java",
+                    "src/main/java/com/example/board/dto/PostRequest.java",
+                    "src/main/java/com/example/board/dto/PostResponse.java",
+                    "src/main/java/com/example/board/repository/InMemoryPostRepository.java",
+                    "src/main/java/com/example/board/service/PostService.java",
+                    "src/main/java/com/example/board/controller/BoardController.java",
+                    "src/main/java/com/example/board/exception/NotFoundException.java",
+                    "src/main/java/com/example/board/exception/GlobalExceptionHandler.java",
+                }
+                if any(path.startswith("src/main/java/com/example/board/") for path in existing_files):
+                    missing_board_files = sorted(path for path in board_required_files if path not in existing_files)
+                    for path in missing_board_files:
+                        issues.append(
+                            ValidationIssue(
+                                path=path,
+                                message="Board CRUD source set is incomplete. Required supporting file is missing.",
+                            )
+                        )
                 dockerfile = existing_files.get("Dockerfile", "")
                 if dockerfile:
                     if 'ENTRYPOINT ["java", "-jar"' not in dockerfile:
@@ -168,11 +210,62 @@ class SampleAppTools:
 
     def build_code(self, project_dir: Path, output_base: Path) -> BuildCodeResult:
         with timed_step(logger, "sample_app_gen.tools.build_code", project_dir=str(project_dir), output_base=str(output_base)):
-            emit_event(owner="sample_app", phase="tool.build_code", status="started", message="아티팩트 패키징 도구를 호출합니다.", details={"project_dir": str(project_dir)})
+            emit_event(owner="sample_app", phase="tool.build_code", status="started", message="jar 산출물 생성을 시작합니다.", details={"project_dir": str(project_dir)})
+            build_descriptor = {path.name for path in project_dir.iterdir() if path.is_file()}
+            build_command: list[str] | None = None
+            if "gradlew" in build_descriptor and (project_dir / "gradle" / "wrapper" / "gradle-wrapper.jar").exists():
+                build_command = ["sh", "./gradlew", "clean", "bootJar", "--no-daemon", "-x", "test"]
+            elif "build.gradle" in build_descriptor and shutil.which("gradle"):
+                build_command = ["gradle", "clean", "bootJar", "--no-daemon", "-x", "test"]
+            elif "build.gradle" in build_descriptor and shutil.which("docker"):
+                build_command = self._dockerized_gradle_build_command(project_dir)
+            elif "mvnw" in build_descriptor:
+                build_command = ["sh", "./mvnw", "-q", "-DskipTests", "package"]
+            elif "pom.xml" in build_descriptor and shutil.which("mvn"):
+                build_command = ["mvn", "-q", "-DskipTests", "package"]
+
+            if build_command is not None:
+                try:
+                    build_result = subprocess.run(
+                        build_command,
+                        cwd=project_dir,
+                        check=False,
+                        text=True,
+                        capture_output=True,
+                        timeout=1800,
+                    )
+                except FileNotFoundError as exc:
+                    emit_event(owner="sample_app", phase="tool.build_code", status="failed", message="애플리케이션 빌드 도구를 찾지 못했습니다.", details={"error": str(exc)})
+                    return {
+                        "ok": False,
+                        "output_path": "",
+                        "stderr": f"Build tool not found: {exc.filename or exc}",
+                        "error_code": "E_BUILD_TOOL_MISSING",
+                    }
+                if build_result.returncode != 0:
+                    emit_event(owner="sample_app", phase="tool.build_code", status="failed", message="애플리케이션 빌드가 실패했습니다.", details={"returncode": build_result.returncode})
+                    return {
+                        "ok": False,
+                        "output_path": "",
+                        "stderr": build_result.stderr or build_result.stdout,
+                        "error_code": "E_BUILD_FAILED",
+                    }
+
+            packaged_artifact = self._resolve_packaged_artifact(project_dir)
+            if packaged_artifact is None:
+                emit_event(owner="sample_app", phase="tool.build_code", status="failed", message="패키징된 jar 산출물을 찾지 못했습니다.", details={"project_dir": str(project_dir)})
+                return {
+                    "ok": False,
+                    "output_path": "",
+                    "stderr": "Packaged application artifact was not found after build.",
+                    "error_code": "E_ARTIFACT_MISSING",
+                }
+
             output_base.parent.mkdir(parents=True, exist_ok=True)
-            archive_path = shutil.make_archive(str(output_base), "zip", root_dir=project_dir)
-            emit_event(owner="sample_app", phase="tool.build_code", status="completed", message="아티팩트 패키징이 완료되었습니다.", details={"output_path": archive_path})
-            return {"ok": True, "output_path": archive_path}
+            output_path = output_base.with_suffix(".jar")
+            shutil.copy2(packaged_artifact, output_path)
+            emit_event(owner="sample_app", phase="tool.build_code", status="completed", message="jar 산출물 생성이 완료되었습니다.", details={"output_path": str(output_path)})
+            return {"ok": True, "output_path": str(output_path), "stderr": "", "error_code": ""}
 
     def docker_build(
         self,
@@ -186,8 +279,6 @@ class SampleAppTools:
             emit_event(owner="sample_app", phase="tool.docker_build", status="started", message="Docker 이미지 빌드/전송 도구를 호출합니다.", details={"image_name": image_name, "tag": tag})
             target = request.targets[0] if request.targets else None
             image_ref = self._image_ref(image_name=image_name, tag=tag)
-            archive_path = output_dir / f"{self._safe_name(image_ref)}.tar"
-            remote_archive_path = f"/tmp/{archive_path.name}"
             command_label = f"docker_build --target {image_ref}"
 
             if target is None:
@@ -195,8 +286,8 @@ class SampleAppTools:
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
+                    archive_path="",
+                    remote_archive_path="",
                     command_label=command_label,
                     error_code="E_TARGET_MISSING",
                     stderr="No target host was provided for docker image upload.",
@@ -209,8 +300,8 @@ class SampleAppTools:
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
+                    archive_path="",
+                    remote_archive_path="",
                     command_label=command_label,
                     error_code="E_AUTH_UNSUPPORTED",
                     stderr=f"Unsupported auth_method for docker image upload: {target.auth_method}",
@@ -224,16 +315,14 @@ class SampleAppTools:
                     "image_name": image_name,
                     "tag": tag,
                     "image_ref": image_ref,
-                    "archive_path": str(archive_path),
-                    "remote_archive_path": remote_archive_path,
+                    "archive_path": "",
+                    "remote_archive_path": "",
                     "command_label": command_label + " --dry-run",
                     "stderr": "",
                     "error_code": "",
                 }
                 emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="드라이런 모드로 이미지 빌드/전송을 건너뛰었습니다.", details={"image_ref": image_ref})
                 return result
-
-            output_dir.mkdir(parents=True, exist_ok=True)
 
             build_result = subprocess.run(
                 ["docker", "build", "-t", image_ref, str(project_dir)],
@@ -247,8 +336,8 @@ class SampleAppTools:
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
+                    archive_path="",
+                    remote_archive_path="",
                     command_label=command_label,
                     error_code="E_DOCKER_BUILD",
                     stderr=build_result.stderr or build_result.stdout,
@@ -256,68 +345,48 @@ class SampleAppTools:
                 emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker build가 실패했습니다.", details={"error_code": result["error_code"]})
                 return result
 
-            save_result = subprocess.run(
-                ["docker", "image", "save", "-o", str(archive_path), image_ref],
+            save_process = subprocess.Popen(
+                ["docker", "image", "save", image_ref],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            remote_result = subprocess.run(
+                self._build_ssh_command(target=target, remote_command="docker load"),
+                stdin=save_process.stdout,
                 check=False,
-                text=True,
                 capture_output=True,
                 timeout=1800,
             )
-            if save_result.returncode != 0:
+            if save_process.stdout is not None:
+                save_process.stdout.close()
+            save_stderr = ""
+            if save_process.stderr is not None:
+                save_stderr = save_process.stderr.read().decode("utf-8", errors="replace")
+            save_returncode = save_process.wait(timeout=1800)
+            if save_returncode != 0:
                 result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
+                    archive_path="",
+                    remote_archive_path="",
                     command_label=command_label,
                     error_code="E_DOCKER_SAVE",
-                    stderr=save_result.stderr or save_result.stdout,
+                    stderr=save_stderr,
                 )
                 emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker image save가 실패했습니다.", details={"error_code": result["error_code"]})
                 return result
 
-            scp_result = subprocess.run(
-                self._build_scp_command(target=target, local_path=archive_path, remote_path=remote_archive_path),
-                check=False,
-                text=True,
-                capture_output=True,
-                timeout=1800,
-            )
-            if scp_result.returncode != 0:
-                result = self._docker_error(
-                    image_name=image_name,
-                    tag=tag,
-                    image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
-                    command_label=command_label,
-                    error_code="E_IMAGE_UPLOAD",
-                    stderr=scp_result.stderr or scp_result.stdout,
-                )
-                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="Docker 이미지 업로드가 실패했습니다.", details={"error_code": result["error_code"]})
-                return result
-
-            remote_result = subprocess.run(
-                self._build_ssh_command(
-                    target=target,
-                    remote_command=f"docker load -i {self._shell_quote(remote_archive_path)} && rm -f {self._shell_quote(remote_archive_path)}",
-                ),
-                check=False,
-                text=True,
-                capture_output=True,
-                timeout=1800,
-            )
             if remote_result.returncode != 0:
                 result = self._docker_error(
                     image_name=image_name,
                     tag=tag,
                     image_ref=image_ref,
-                    archive_path=str(archive_path),
-                    remote_archive_path=remote_archive_path,
+                    archive_path="",
+                    remote_archive_path="",
                     command_label=command_label,
                     error_code="E_DOCKER_REMOTE_LOAD",
-                    stderr=remote_result.stderr or remote_result.stdout,
+                    stderr=(remote_result.stderr or remote_result.stdout).decode("utf-8", errors="replace"),
                 )
                 emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 docker load가 실패했습니다.", details={"error_code": result["error_code"]})
                 return result
@@ -327,14 +396,50 @@ class SampleAppTools:
                 "image_name": image_name,
                 "tag": tag,
                 "image_ref": image_ref,
-                "archive_path": str(archive_path),
-                "remote_archive_path": remote_archive_path,
+                "archive_path": "",
+                "remote_archive_path": "",
                 "command_label": command_label,
                 "stderr": "",
                 "error_code": "",
             }
-            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "remote_archive_path": remote_archive_path})
+            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "transport": "docker-save-stream"})
             return result
+
+    def _resolve_packaged_artifact(self, project_dir: Path) -> Path | None:
+        gradle_libs = sorted(
+            path for path in (project_dir / "build" / "libs").glob("*.jar")
+            if not path.name.endswith("-plain.jar")
+        )
+        if gradle_libs:
+            return gradle_libs[0]
+        maven_targets = sorted(
+            path for path in (project_dir / "target").glob("*.jar")
+            if not path.name.endswith(("-sources.jar", "-javadoc.jar", "-original.jar"))
+        )
+        if maven_targets:
+            return maven_targets[0]
+        return None
+
+    def _dockerized_gradle_build_command(self, project_dir: Path) -> list[str]:
+        return [
+            "docker",
+            "run",
+            "--rm",
+            "-e",
+            "GRADLE_USER_HOME=/tmp/gradle-home",
+            "-v",
+            f"{project_dir}:/workspace",
+            "-w",
+            "/workspace",
+            "gradle:8.14-jdk21",
+            "gradle",
+            "clean",
+            "bootJar",
+            "--no-daemon",
+            "-Dorg.gradle.native=false",
+            "-x",
+            "test",
+        ]
 
     def _image_ref(self, image_name: str, tag: str) -> str:
         return image_name if ":" in image_name.rsplit("/", maxsplit=1)[-1] else f"{image_name}:{tag}"

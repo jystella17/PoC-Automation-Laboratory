@@ -1,4 +1,4 @@
-FROM gradle:8.10-jdk${JAVA_VERSION} AS builder
+FROM gradle:${GRADLE_VERSION}-jdk${JAVA_VERSION} AS builder
 
 WORKDIR /workspace
 COPY build.gradle settings.gradle ./

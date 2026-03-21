@@ -30,7 +30,7 @@ Step 3: Tool-based Validation & Build (Strict Sequence)
 - execution_file_write를 호출하여 소스 코드와 설정을 로컬 디렉토리에 물리적으로 생성한다.
 - code_validator를 호출하여 생성된 파일의 문법 및 요구사항 반영 여부를 검증한다.
 - build_code를 호출하여 실행 파일(JAR, WAR 등)을 컴파일 및 패키징한다.
-- docker_build를 호출하여 Docker Image를 생성하고 저장소(S3, ECR 등)에 업로드한다.
+- docker_build를 호출하여 로컬에서 Docker Image를 생성한 뒤 tar 아카이브로 대상 서버에 전송하고, 대상 서버에서 `docker load` 할 수 있게 적재한다.
 
 Step 4: Deployment Command Generation (A2A Contract)
 Infra Build Agent가 대상 서버에서 실행할 수 있는 최종 쉘 명령어 세트를 작성한다. (예: docker run -d ...). 이 명령어는 AgentExecution.notes의 특정 섹션에 포함되어 Supervisor에게 반환된다.
@@ -71,4 +71,4 @@ execution = AgentExecution(
 - execution_file_write: 소스 코드 및 설정 파일을 타겟 디렉토리에 물리적으로 생성한다. -> 결과: 생성된 파일/디렉토리 경로 리턴
 - code_validator: 생성된 코드의 요구 사항 반영 여부 및 문법 오류를 정적 분석한다. -> 결과: Pass/Fail 및 오류 리스트 리턴
 - build_code: mvn, gradle 등을 실행하여 컴파일 오류를 체크하고 Artifact를 생성한다. -> 결과: 생성된 산출물(.jar 등) 경로 리턴
-- docker_build: 산출물을 Docker 이미지로 빌드하고 원격 저장소(S3/ECR 등)에 업로드한다. -> 결과: 업로드된 이미지 URI, Name, Tag 리턴
+- docker_build: 로컬에서 Docker 이미지를 빌드하고 tar로 저장한 뒤 대상 서버에 업로드하여 `docker load`를 수행한다. -> 결과: 대상 서버에 적재된 이미지 Name, Tag 리턴
