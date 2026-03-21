@@ -4,21 +4,30 @@ from apps.celery_app import celery_app
 from Supervisor import MissingInfoError, SupervisorAgent
 from Supervisor.models import UserRequest
 from runtime_bus import RunEventStore
+from shared.utils import now_iso
 
-agent = SupervisorAgent()
 store = RunEventStore()
+
+_agent: SupervisorAgent | None = None
+
+
+def _get_agent() -> SupervisorAgent:
+    global _agent
+    if _agent is None:
+        _agent = SupervisorAgent()
+    return _agent
 
 
 @celery_app.task(name="supervisor.run")
 def run_supervisor_task(run_id: str, payload: dict[str, object]) -> None:
     request = UserRequest.model_validate(payload)
-    store.update_run(run_id, status="running", started_at=_now_iso())
+    store.update_run(run_id, status="running", started_at=now_iso())
 
     def _emit(event: dict[str, object]) -> None:
         store.append_event(run_id, event)
 
     try:
-        result = agent.run(request, event_callback=_emit)
+        result = _get_agent().run(request, event_callback=_emit)
         store.set_result(run_id, result.model_dump(mode="json"), status="succeeded")
     except MissingInfoError as exc:
         error = {
@@ -29,7 +38,7 @@ def run_supervisor_task(run_id: str, payload: dict[str, object]) -> None:
         store.append_event(
             run_id,
             {
-                "timestamp": _now_iso(),
+                "timestamp": now_iso(),
                 "owner": "supervisor",
                 "phase": "run",
                 "status": "failed",
@@ -37,12 +46,12 @@ def run_supervisor_task(run_id: str, payload: dict[str, object]) -> None:
                 "details": error,
             },
         )
-        store.update_run(run_id, status="failed", finished_at=_now_iso(), error=error)
+        store.update_run(run_id, status="failed", finished_at=now_iso(), error=error)
     except Exception as exc:
         store.append_event(
             run_id,
             {
-                "timestamp": _now_iso(),
+                "timestamp": now_iso(),
                 "owner": "supervisor",
                 "phase": "run",
                 "status": "failed",
@@ -51,9 +60,3 @@ def run_supervisor_task(run_id: str, payload: dict[str, object]) -> None:
             },
         )
         store.set_error(run_id, str(exc))
-
-
-def _now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
@@ -13,12 +12,21 @@ from apps.supervisor_tasks import run_supervisor_task
 from Supervisor import MissingInfoError, SupervisorAgent
 from Supervisor.models import BuildPlan, ChatRequest, ChatResponse, GraphView, SupervisorRunResult, UserRequest
 from runtime_bus import AsyncRunEventStore, RunEventStore
+from shared.utils import now_iso
 
 app = FastAPI(title="Supervisor Agent API", version="0.1.0")
-agent = SupervisorAgent()
 logger = get_agent_logger("supervisor.api", "supervisor_api.log")
 store = RunEventStore()
 async_store = AsyncRunEventStore()
+
+_agent: SupervisorAgent | None = None
+
+
+def _get_agent() -> SupervisorAgent:
+    global _agent
+    if _agent is None:
+        _agent = SupervisorAgent()
+    return _agent
 
 
 class RunAsyncStartResponse(BaseModel):
@@ -38,10 +46,6 @@ class RunAsyncStatusResponse(BaseModel):
     events: list[dict[str, object]] = Field(default_factory=list)
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 @app.get("/health")
 async def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -50,19 +54,19 @@ async def health() -> dict[str, str]:
 @app.post("/v1/supervisor/plan", response_model=BuildPlan)
 async def create_plan(request: UserRequest) -> BuildPlan:
     with timed_step(logger, "supervisor_api.create_plan", framework=request.app_tech_stack.framework):
-        return agent.plan(request)
+        return _get_agent().plan(request)
 
 
 @app.get("/v1/supervisor/graph", response_model=GraphView)
 async def get_supervisor_graph() -> GraphView:
-    return agent.graph_view()
+    return _get_agent().graph_view()
 
 
 @app.post("/v1/supervisor/run", response_model=SupervisorRunResult)
 async def run_supervisor(request: UserRequest) -> SupervisorRunResult:
     with timed_step(logger, "supervisor_api.run_supervisor", framework=request.app_tech_stack.framework):
         try:
-            return agent.run(request)
+            return _get_agent().run(request)
         except MissingInfoError as exc:
             log_event(logger, "supervisor_api.run_supervisor.missing_info", missing_fields=exc.missing_fields)
             raise HTTPException(
@@ -79,7 +83,7 @@ async def run_supervisor(request: UserRequest) -> SupervisorRunResult:
 async def run_supervisor_async(request: UserRequest) -> RunAsyncStartResponse:
     with timed_step(logger, "supervisor_api.run_async.enqueue", framework=request.app_tech_stack.framework):
         run_id = uuid4().hex
-        queued_at = _now_iso()
+        queued_at = now_iso()
         store.initialize_run(run_id, queued_at)
         store.append_event(
             run_id,
@@ -170,6 +174,7 @@ async def chat(request: ChatRequest) -> ChatResponse:
         try:
             payload = json.loads(last_user)
             parsed = UserRequest.model_validate(payload)
+            agent = _get_agent()
             plan = agent.plan(parsed)
             reply = agent.llm.generate_supervisor_reply(parsed, plan, None)
             log_event(
