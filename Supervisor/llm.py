@@ -21,11 +21,18 @@ class SupervisorLLM(BaseLLM):
     def __init__(self, settings: AzureOpenAISettings):
         super().__init__(settings)
 
+    @staticmethod
+    def _components_str(request: UserRequest, default: str = "none") -> str:
+        return ", ".join(request.infra_tech_stack.components) or default
+
+    @staticmethod
+    def _languages_str(request: UserRequest, default: str = "none") -> str:
+        return ", ".join(request.app_tech_stack.language) or default
+
     def summarize_plan(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
-        if self.settings.enabled and self.settings.is_configured:
-            azure_summary = self._summarize_with_azure(request, missing_requirements)
-            if azure_summary:
-                return azure_summary
+        azure_summary = self._summarize_with_azure(request, missing_requirements)
+        if azure_summary:
+            return azure_summary
 
         return self._fallback_summary(request, missing_requirements)
 
@@ -35,10 +42,9 @@ class SupervisorLLM(BaseLLM):
         plan: BuildPlan,
         run_result: SupervisorRunResult | None = None,
     ) -> str:
-        if self.settings.enabled and self.settings.is_configured:
-            azure_reply = self._generate_reply_with_azure(request, plan, run_result)
-            if azure_reply:
-                return azure_reply
+        azure_reply = self._generate_reply_with_azure(request, plan, run_result)
+        if azure_reply:
+            return azure_reply
 
         return self._fallback_reply(request, plan, run_result)
 
@@ -56,8 +62,8 @@ class SupervisorLLM(BaseLLM):
         if llm is None:
             return None
 
-        components = ", ".join(request.infra_tech_stack.components) or "none"
-        languages = ", ".join(request.app_tech_stack.language) or "none"
+        components = self._components_str(request)
+        languages = self._languages_str(request)
         missing_fields = ", ".join(item.field for item in missing_requirements) or "none"
         human_prompt = (
             "Respond in Korean.\n"
@@ -82,7 +88,7 @@ class SupervisorLLM(BaseLLM):
         return None
 
     def _fallback_summary(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
-        components = ", ".join(request.infra_tech_stack.components) or "선택된 인프라 구성요소 없음"
+        components = self._components_str(request, default="선택된 인프라 구성요소 없음")
         framework = request.app_tech_stack.framework or "애플리케이션 프레임워크 미지정"
         summary = f"{components} 환경과 {framework} 애플리케이션 구성을 기준으로 실행 준비 상태를 검토했습니다."
         if request.additional_request.strip():
@@ -103,8 +109,8 @@ class SupervisorLLM(BaseLLM):
         if llm is None:
             return None
 
-        components = ", ".join(request.infra_tech_stack.components) or "none"
-        languages = ", ".join(request.app_tech_stack.language) or "none"
+        components = self._components_str(request)
+        languages = self._languages_str(request)
         step_lines = "\n".join(
             f"{index}. {step.describe()}" for index, step in enumerate(plan.steps, start=1)
         ) or "1. 현재 수행 예정 작업이 정리되지 않았습니다."
@@ -144,8 +150,8 @@ class SupervisorLLM(BaseLLM):
         plan: BuildPlan,
         run_result: SupervisorRunResult | None = None,
     ) -> str:
-        components = ", ".join(request.infra_tech_stack.components) or "없음"
-        languages = ", ".join(request.app_tech_stack.language) or "없음"
+        components = self._components_str(request, default="없음")
+        languages = self._languages_str(request, default="없음")
         lines = [
             "요청 내용",
             f"- 인프라 기술스택: {components}",

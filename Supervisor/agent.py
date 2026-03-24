@@ -10,9 +10,11 @@ from InfraAutoSetting import InfraAutoSettingAgent
 from SampleAppGen import SampleAppAgent
 from agent_logging import get_agent_logger, log_event, timed_step
 from eventing import emit_event, reset_event_callback, set_event_callback
+from shared.graph_utils import generate_mermaid
 
 from .config import SupervisorSettings, load_settings
 from .llm import SupervisorLLM
+from .validation import check_missing_info, has_app_request, has_infra_request
 from .models import (
     AgentExecution,
     BuildPlan,
@@ -73,18 +75,7 @@ GRAPH_EDGES = [
     GraphEdge(source="finalize", target="END"),
 ]
 
-GRAPH_MERMAID = "\n".join(
-    [
-        "graph TD",
-        "    START([Start]) --> plan[Plan Request]",
-        "    plan -->|mode=run and complete| dispatch{Dispatch Agents}",
-        "    plan -->|mode=plan or blocked| finalize[Finalize Result]",
-        "    dispatch --> build_infra[Build Infra]",
-        "    build_infra --> generate_app[Generate App]",
-        "    generate_app --> finalize",
-        "    finalize --> END([End])",
-    ]
-)
+GRAPH_MERMAID = generate_mermaid(GRAPH_NODES, GRAPH_EDGES)
 
 
 class SupervisorAgent:
@@ -132,107 +123,6 @@ class SupervisorAgent:
     ) -> None:
         emit_event(owner=owner, phase=phase, status=status, message=message, details=details)
 
-    def _missing_info(self, req: UserRequest) -> list[MissingRequirement]:
-        missing: list[MissingRequirement] = []
-        app_languages = [language.strip().lower() for language in req.app_tech_stack.language]
-        has_infra_request = bool(req.infra_tech_stack.components)
-        has_app_request = req.app_tech_stack.framework.strip().lower() not in {"", "none"} and req.topology.apps > 0
-
-        if not req.targets:
-            missing.append(
-                MissingRequirement(
-                    field="targets",
-                    question="Which test server should be used for this run?",
-                    reason="A target host and SSH access path are required before execution.",
-                )
-            )
-        else:
-            for idx, target in enumerate(req.targets):
-                prefix = f"targets[{idx}]"
-                if not target.host.strip():
-                    missing.append(
-                        MissingRequirement(
-                            field=f"{prefix}.host",
-                            question="What is the target host IP or hostname?",
-                            reason="The supervisor cannot build or deploy without a destination host.",
-                        )
-                    )
-                if not target.user.strip():
-                    missing.append(
-                        MissingRequirement(
-                            field=f"{prefix}.user",
-                            question="Which SSH user should be used on the target host?",
-                            reason="Remote execution requires an explicit login account.",
-                        )
-                    )
-                if not target.auth_ref.strip():
-                    missing.append(
-                        MissingRequirement(
-                            field=f"{prefix}.auth_ref",
-                            question="What secret or key reference should be used for SSH authentication?",
-                            reason="The target host exists, but no SSH credential reference was provided.",
-                        )
-                    )
-
-        if not has_infra_request and not has_app_request:
-            missing.append(
-                MissingRequirement(
-                    field="infra_tech_stack.components",
-                    question="Which infra components should be installed, or which application framework should be generated?",
-                    reason="At least one infra component or an application framework is required before execution.",
-                )
-            )
-
-        versions = req.infra_tech_stack.versions
-        if has_infra_request and not versions:
-            missing.append(
-                MissingRequirement(
-                    field="infra_tech_stack.versions",
-                    question="Which component versions should be applied?",
-                    reason="Version selection is required to generate deterministic install steps.",
-                )
-            )
-        elif has_infra_request:
-            if "tomcat" in req.infra_tech_stack.components and versions.get("tomcat", "").strip() in {"", "none"}:
-                missing.append(
-                    MissingRequirement(
-                        field="infra_tech_stack.versions.tomcat",
-                        question="Which Tomcat version should be installed?",
-                        reason="Tomcat is selected as a component, but its version is missing.",
-                    )
-                )
-            if "kafka" in req.infra_tech_stack.components and versions.get("kafka", "").strip() in {"", "none"}:
-                missing.append(
-                    MissingRequirement(
-                        field="infra_tech_stack.versions.kafka",
-                        question="Which Kafka version should be installed?",
-                        reason="Kafka is selected as a component, but its version is missing.",
-                    )
-                )
-            requires_java = (
-                    any(component in {"tomcat", "kafka"} for component in req.infra_tech_stack.components)
-                    or any(language.startswith("java") for language in app_languages)
-            )
-            if requires_java and versions.get("java", "").strip() == "":
-                missing.append(
-                    MissingRequirement(
-                        field="infra_tech_stack.versions.java",
-                        question="Which Java version should be used for the infra and app stack?",
-                        reason="Java is required for Tomcat, Kafka, and most sample app flows.",
-                    )
-                )
-
-        if not req.logging.base_dir.strip():
-            missing.append(
-                MissingRequirement(
-                    field="logging.base_dir",
-                    question="Where should the base log directory be created?",
-                    reason="The AGENT.md gate requires a log directory policy before execution.",
-                )
-            )
-
-        return missing
-
     def _build_plan_steps(self, blocked: bool) -> list[PlanStep]:
         blocked_status = "failed" if blocked else "pending"
         blocked_detail = (
@@ -268,15 +158,15 @@ class SupervisorAgent:
 
     def _build_plan_steps_for_request(self, req: UserRequest, blocked: bool) -> list[PlanStep]:
         steps = self._build_plan_steps(blocked)
-        has_infra_request = bool(req.infra_tech_stack.components)
-        has_app_request = req.app_tech_stack.framework.strip().lower() not in {"", "none"} and req.topology.apps > 0
+        _has_infra = has_infra_request(req)
+        _has_app = has_app_request(req)
 
         updated_steps: list[PlanStep] = []
         for step in steps:
-            if step.name == "build_infra" and not has_infra_request and not blocked:
+            if step.name == "build_infra" and not _has_infra and not blocked:
                 updated_steps.append(PlanStep(name=step.name, owner=step.owner, status="completed", detail="선택된 인프라 구성요소가 없어 인프라 설치 단계는 건너뜁니다."))
                 continue
-            if step.name == "generate_app" and not has_app_request and not blocked:
+            if step.name == "generate_app" and not _has_app and not blocked:
                 updated_steps.append(PlanStep(name=step.name, owner=step.owner, status="completed", detail="선택된 애플리케이션 프레임워크가 없어 애플리케이션 생성 단계는 건너뜁니다."))
                 continue
             updated_steps.append(step)
@@ -342,7 +232,7 @@ class SupervisorAgent:
                 status="started",
                 message="입력값 검증 및 실행 계획을 생성합니다.",
             )
-            missing_requirements = self._missing_info(request)
+            missing_requirements = check_missing_info(request)
             blocked = bool(missing_requirements)
             summary = self.llm.summarize_plan(request, missing_requirements)
             if blocked:
@@ -378,9 +268,9 @@ class SupervisorAgent:
         with timed_step(logger, "supervisor.dispatch_node"):
             request = _state["request"]
             dispatch_plan = []
-            if request.infra_tech_stack.components:
+            if has_infra_request(request):
                 dispatch_plan.append("build_infra")
-            if request.app_tech_stack.framework.strip().lower() not in {"", "none"} and request.topology.apps > 0:
+            if has_app_request(request):
                 dispatch_plan.append("generate_app")
             log_event(
                 logger,
@@ -541,7 +431,7 @@ class SupervisorAgent:
     def chat_reply(self, req: UserRequest) -> tuple[str, BuildPlan, SupervisorRunResult | None]:
         with timed_step(logger, "supervisor.chat_reply", framework=req.app_tech_stack.framework):
             run_result: SupervisorRunResult | None = None
-            if self._missing_info(req):
+            if check_missing_info(req):
                 state = self._invoke(req, mode="plan")
                 plan = self._build_plan_from_state(state)
             else:
