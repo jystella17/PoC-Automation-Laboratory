@@ -344,6 +344,7 @@ def fallback_gradle_build(plan: ApplicationPlan) -> str:
     elif "3.0" in plan.framework_version:
         spring_boot_version = "3.0.0"
     java_version = normalized_runtime_version(plan.runtime_version, default="17")
+    java_major = java_version.split(".")[0]
     return (
         "plugins {\n"
         "    id 'java'\n"
@@ -354,7 +355,7 @@ def fallback_gradle_build(plan: ApplicationPlan) -> str:
         "version = '0.0.1-SNAPSHOT'\n\n"
         "java {\n"
         "    toolchain {\n"
-        "        languageVersion = JavaLanguageVersion.of(" + java_version + ")\n"
+        "        languageVersion = JavaLanguageVersion.of(" + java_major + ")\n"
         "    }\n"
         "}\n\n"
         "repositories {\n"

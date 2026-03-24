@@ -269,7 +269,8 @@ class SampleAppTools(BaseTools):
                 emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="드라이런 모드로 이미지 빌드/전송을 건너뛰었습니다.", details={"image_ref": image_ref})
                 return result
 
-            build_error = self._docker_build_image(project_dir, image_ref, image_name, tag, command_label)
+            platform = self._resolve_target_platform(target.os_type)
+            build_error = self._docker_build_image(project_dir, image_ref, image_name, tag, command_label, platform=platform)
             if build_error is not None:
                 return build_error
 
@@ -300,11 +301,19 @@ class SampleAppTools(BaseTools):
 
         return None
 
+    def _resolve_target_platform(self, os_type: str) -> str:
+        """대상 서버 OS 타입을 Docker --platform 값으로 변환합니다."""
+        normalized = os_type.strip().lower()
+        if any(token in normalized for token in ("arm", "aarch64", "graviton")):
+            return "linux/arm64"
+        return "linux/amd64"
+
     def _docker_build_image(
         self, project_dir: Path, image_ref: str, image_name: str, tag: str, command_label: str,
+        platform: str = "linux/amd64",
     ) -> DockerBuildResult | None:
         build_result = subprocess.run(
-            ["docker", "build", "-t", image_ref, str(project_dir)],
+            ["docker", "build", "--platform", platform, "-t", image_ref, str(project_dir)],
             check=False, text=True, capture_output=True, timeout=1800,
         )
         if build_result.returncode != 0:

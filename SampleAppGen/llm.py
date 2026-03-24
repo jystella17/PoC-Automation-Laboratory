@@ -93,7 +93,8 @@ class SampleAppGeneratorLLM(BaseLLM):
                 "For Spring/Spring Boot, choose build_system as maven or gradle based on user request/additional_request. "
                 "Use environment variables for DB passwords. "
                 "The spec_markdown must include endpoints, data/config notes, and any requested failure scenarios. "
-                "Do NOT include bare-metal operation scripts (start.sh, stop.sh, run.sh, deploy.sh) in the file plan — the app is deployed via Docker."
+                "Do NOT include bare-metal operation scripts (start.sh, stop.sh, run.sh, deploy.sh) in the file plan — the app is deployed via Docker. "
+                "deployment_commands must contain only 'docker run' commands (e.g. 'docker run -d -p 8080:8080 ...'), never 'docker build' commands."
             )
             response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
             payload = self._extract_json(getattr(response, "content", ""))

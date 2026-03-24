@@ -383,7 +383,10 @@ class SampleAppAgent:
                     "success": False,
                 }
             archive_path = build["output_path"]
-            run_cmd = plan.deployment_commands[0] if plan.deployment_commands else None
+            run_cmd = next(
+                (cmd.strip() for cmd in plan.deployment_commands if cmd.strip().startswith("docker run")),
+                None,
+            )
             docker = self.tools.call(
                 "docker_build",
                 project_dir=project_dir,
