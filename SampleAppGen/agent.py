@@ -93,7 +93,14 @@ class SampleAppAgent:
             },
         )
         workflow.add_edge("repair_files", "validate_files")
-        workflow.add_edge("package_artifacts", "finalize")
+        workflow.add_conditional_edges(
+            "package_artifacts",
+            self._route_after_packaging,
+            {
+                "repair_files": "repair_files",
+                "finalize": "finalize",
+            },
+        )
         workflow.add_edge("finalize", END)
         return workflow.compile()
 
@@ -365,12 +372,14 @@ class SampleAppAgent:
                     message="애플리케이션 빌드 단계에서 실패했습니다.",
                     details={"error_code": build["error_code"]},
                 )
+                build_issues = self._parse_build_issues(build["stderr"], project_dir)
                 return {
                     "executed_commands": [f"build_code --path {project_dir} --output {archive_base}.jar"],
                     "notes": [
                         f"BUILD_ERROR: {build['error_code']}",
                         f"BUILD_STDERR: {build['stderr'][:4000]}" if build["stderr"] else "BUILD_STDERR: none",
                     ],
+                    "validation_issues": build_issues,
                     "success": False,
                 }
             archive_path = build["output_path"]
@@ -439,6 +448,34 @@ class SampleAppAgent:
                 "notes": notes,
                 "success": docker["ok"],
             }
+
+    def _route_after_packaging(self, state: SampleAppState) -> str:
+        issues = state.get("validation_issues", [])
+        if issues and state.get("repair_round", 0) < self.max_repairs:
+            return "repair_files"
+        return "finalize"
+
+    def _parse_build_issues(self, stderr: str, project_dir: Path) -> list[ValidationIssue]:
+        """Java/Gradle 컴파일 에러 stderr를 ValidationIssue 리스트로 파싱합니다."""
+        issues: list[ValidationIssue] = []
+        seen: set[str] = set()
+        pattern = re.compile(r"^(/[^\n:]+\.java):(\d+): error: (.+)$", re.MULTILINE)
+        for match in pattern.finditer(stderr):
+            raw_path, line_num, message = match.group(1), match.group(2), match.group(3).strip()
+            path = raw_path
+            for base in (project_dir, Path("/workspace")):
+                try:
+                    path = str(Path(raw_path).relative_to(base))
+                    break
+                except ValueError:
+                    continue
+            key = f"{path}:{line_num}"
+            if key not in seen:
+                seen.add(key)
+                issues.append(ValidationIssue(path=path, message=f"Compilation error at line {line_num}: {message}"))
+        if not issues and stderr.strip():
+            issues.append(ValidationIssue(path="BUILD", message=f"Build failed: {stderr.strip()[:500]}"))
+        return issues
 
     def _finalize_node(self, state: SampleAppState) -> SampleAppState:
         return {"success": state.get("success", False)}
