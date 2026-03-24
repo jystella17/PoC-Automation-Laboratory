@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from config.versions import COMPONENT_VERSION_OPTIONS
+COMPONENT_VERSION_OPTIONS: dict[str, list[str]] = {
+    "apache": ["None", "2.4.66", "2.4.65"],
+    "tomcat": ["None", "10", "9"],
+    "kafka": ["None", "3.6", "3.5"],
+    "pinpoint": ["None", "Pinpoint v3", "Pinpoint v2"],
+}
 
 COMPONENT_OPTIONS = ["Apache", "Tomcat", "Kafka", "Pinpoint", "Others"]
 OS_OPTIONS = ["Linux", "Windows"]
