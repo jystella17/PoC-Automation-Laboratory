@@ -19,6 +19,11 @@ Prefer practical, runnable code over placeholders. Respect requested failure sce
 Never expose secrets in generated code. Use environment variables for passwords and secrets.
 Return JSON only when asked for JSON. Return raw file contents only when asked for a file body.
 
+Deployment context:
+  All generated applications are containerized with Docker and deployed via docker run.
+  Do not generate bare-metal operation scripts (e.g. start.sh, stop.sh, run.sh, deploy.sh).
+  A Dockerfile is the only deployment artifact needed alongside the application build.
+
 Cross-file consistency rule:
   When generating a file that calls methods from another already-generated file,
   you MUST use the exact method/function names as they appear in the provided context.
@@ -87,7 +92,8 @@ class SampleAppGeneratorLLM(BaseLLM):
                 "Use Java for Spring/Spring Boot and Python for FastAPI. "
                 "For Spring/Spring Boot, choose build_system as maven or gradle based on user request/additional_request. "
                 "Use environment variables for DB passwords. "
-                "The spec_markdown must include endpoints, data/config notes, and any requested failure scenarios."
+                "The spec_markdown must include endpoints, data/config notes, and any requested failure scenarios. "
+                "Do NOT include bare-metal operation scripts (start.sh, stop.sh, run.sh, deploy.sh) in the file plan — the app is deployed via Docker."
             )
             response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
             payload = self._extract_json(getattr(response, "content", ""))
