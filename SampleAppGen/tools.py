@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from Supervisor.models import TargetHost, UserRequest
-from agent_logging import get_agent_logger, timed_step
+from agent_logging import get_agent_logger, log_event, timed_step
 from eventing import emit_event
 from shared.base_tools import BaseTools, FileWriteResult
 
@@ -371,20 +372,16 @@ class SampleAppTools(BaseTools):
             return result
 
         if run_cmd:
-            run_result = subprocess.run(
-                self._build_ssh_command(target=target, remote_command=run_cmd),
-                check=False, capture_output=True, timeout=60,
-            )
-            if run_result.returncode != 0:
+            ok, final_cmd, run_stderr = self._docker_run_with_failover(target, run_cmd)
+            if not ok:
                 result = self._docker_error(
                     image_name=image_name, tag=tag, image_ref=image_ref,
                     archive_path="", remote_archive_path="", command_label=command_label,
-                    error_code="E_DOCKER_REMOTE_RUN",
-                    stderr=(run_result.stderr or run_result.stdout).decode("utf-8", errors="replace"),
+                    error_code="E_DOCKER_REMOTE_RUN", stderr=run_stderr,
                 )
                 emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 docker run이 실패했습니다.", details={"error_code": result["error_code"]})
                 return result
-            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드, 적재, 컨테이너 기동이 완료되었습니다.", details={"image_ref": image_ref, "run_cmd": run_cmd})
+            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드, 적재, 컨테이너 기동이 완료되었습니다.", details={"image_ref": image_ref, "run_cmd": final_cmd})
         else:
             emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "transport": "docker-save-stream"})
 
@@ -428,6 +425,62 @@ class SampleAppTools(BaseTools):
 
     def _image_ref(self, image_name: str, tag: str) -> str:
         return image_name if ":" in image_name.rsplit("/", maxsplit=1)[-1] else f"{image_name}:{tag}"
+
+    _PORT_CONFLICT_PATTERNS = ("port is already allocated", "address already in use", "bind:")
+
+    def _is_port_conflict(self, stderr: str) -> bool:
+        lower = stderr.lower()
+        return any(pattern in lower for pattern in self._PORT_CONFLICT_PATTERNS)
+
+    def _replace_host_port(self, run_cmd: str, new_port: int) -> str:
+        """`-p HOST:CONTAINER` 패턴에서 HOST 포트만 교체합니다."""
+        return re.sub(r"(-p\s+)\d+(:)", rf"\g<1>{new_port}\2", run_cmd)
+
+    def _container_name_from_run_cmd(self, run_cmd: str) -> str | None:
+        """run_cmd에서 --name 값을 추출합니다."""
+        match = re.search(r"--name\s+(\S+)", run_cmd)
+        return match.group(1) if match else None
+
+    def _docker_run_with_failover(
+        self,
+        target: TargetHost,
+        run_cmd: str,
+        max_retries: int = 3,
+    ) -> tuple[bool, str, str]:
+        """docker run을 실행하고 포트 충돌 시 랜덤 포트로 최대 max_retries회 재시도합니다.
+        매 시도 전 이전 실패로 남은 동일 이름 컨테이너를 stop/rm으로 정리합니다.
+
+        Returns:
+            (성공 여부, 최종 실행된 run_cmd, stderr)
+        """
+        container_name = self._container_name_from_run_cmd(run_cmd)
+        cleanup = (
+            f"docker stop {container_name} 2>/dev/null; docker rm {container_name} 2>/dev/null"
+            if container_name else ""
+        )
+        current_cmd = run_cmd
+        for attempt in range(max_retries + 1):
+            remote_command = f"{cleanup}; {current_cmd}" if cleanup else current_cmd
+            run_result = subprocess.run(
+                self._build_ssh_command(target=target, remote_command=remote_command),
+                check=False, capture_output=True, timeout=60,
+            )
+            stderr = (run_result.stderr or run_result.stdout).decode("utf-8", errors="replace")
+            if run_result.returncode == 0:
+                return True, current_cmd, ""
+            if attempt < max_retries and self._is_port_conflict(stderr):
+                new_port = random.randint(10000, 65535)
+                log_event(logger, "sample_app_gen.tools.docker_run.port_failover",
+                          attempt=attempt + 1, new_port=new_port)
+                emit_event(
+                    owner="sample_app", phase="tool.docker_build", status="progress",
+                    message=f"포트 충돌 감지. {new_port} 포트로 재시도합니다. ({attempt + 1}/{max_retries})",
+                    details={"attempt": attempt + 1, "new_port": new_port},
+                )
+                current_cmd = self._replace_host_port(run_cmd, new_port)
+            else:
+                return False, current_cmd, stderr
+        return False, current_cmd, "포트 failover 최대 횟수 초과"
 
     def _docker_error(
         self,

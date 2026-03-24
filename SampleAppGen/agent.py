@@ -3,6 +3,7 @@ from __future__ import annotations
 import operator
 import re
 import shutil
+from datetime import datetime
 from collections import defaultdict
 from pathlib import Path
 from typing import Annotated, TypedDict
@@ -383,17 +384,23 @@ class SampleAppAgent:
                     "success": False,
                 }
             archive_path = build["output_path"]
+            build_tag = datetime.now().strftime("%Y%m%d-%H%M%S")
+            image_name_base = plan.image_name.rsplit(":", 1)[0]
+            new_image_ref = f"{image_name_base}:{build_tag}"
+
             run_cmd = next(
                 (cmd.strip() for cmd in plan.deployment_commands if cmd.strip().startswith("docker run")),
                 None,
             )
+            if run_cmd:
+                run_cmd = run_cmd.replace(plan.image_name, new_image_ref)
             docker = self.tools.call(
                 "docker_build",
                 project_dir=project_dir,
-                image_name=plan.image_name,
+                image_name=image_name_base,
                 request=request,
                 output_dir=dist_dir,
-                tag="latest",
+                tag=build_tag,
                 run_cmd=run_cmd,
             )
 
