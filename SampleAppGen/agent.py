@@ -383,6 +383,7 @@ class SampleAppAgent:
                     "success": False,
                 }
             archive_path = build["output_path"]
+            run_cmd = plan.deployment_commands[0] if plan.deployment_commands else None
             docker = self.tools.call(
                 "docker_build",
                 project_dir=project_dir,
@@ -390,6 +391,7 @@ class SampleAppAgent:
                 request=request,
                 output_dir=dist_dir,
                 tag="latest",
+                run_cmd=run_cmd,
             )
 
             recommended = [f"APP_LOG_DIR={plan.log_dir}", *plan.required_env]

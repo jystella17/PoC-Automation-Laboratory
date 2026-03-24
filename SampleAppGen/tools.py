@@ -242,6 +242,7 @@ class SampleAppTools(BaseTools):
         request: UserRequest,
         output_dir: Path,
         tag: str = "latest",
+        run_cmd: str | None = None,
     ) -> DockerBuildResult:
         with timed_step(logger, "sample_app_gen.tools.docker_build", image_name=image_name, tag=tag):
             emit_event(owner="sample_app", phase="tool.docker_build", status="started", message="Docker 이미지 빌드/전송 도구를 호출합니다.", details={"image_name": image_name, "tag": tag})
@@ -272,7 +273,7 @@ class SampleAppTools(BaseTools):
             if build_error is not None:
                 return build_error
 
-            return self._docker_stream_to_remote(target, image_ref, image_name, tag, command_label)
+            return self._docker_stream_to_remote(target, image_ref, image_name, tag, command_label, run_cmd=run_cmd)
 
     def _validate_docker_target(
         self, target: TargetHost | None, image_name: str, tag: str, image_ref: str, command_label: str,
@@ -318,7 +319,13 @@ class SampleAppTools(BaseTools):
         return None
 
     def _docker_stream_to_remote(
-        self, target: TargetHost, image_ref: str, image_name: str, tag: str, command_label: str,
+        self,
+        target: TargetHost,
+        image_ref: str,
+        image_name: str,
+        tag: str,
+        command_label: str,
+        run_cmd: str | None = None,
     ) -> DockerBuildResult:
         save_process = subprocess.Popen(
             ["docker", "image", "save", image_ref],
@@ -354,7 +361,25 @@ class SampleAppTools(BaseTools):
             emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 docker load가 실패했습니다.", details={"error_code": result["error_code"]})
             return result
 
-        result = {
+        if run_cmd:
+            run_result = subprocess.run(
+                self._build_ssh_command(target=target, remote_command=run_cmd),
+                check=False, capture_output=True, timeout=60,
+            )
+            if run_result.returncode != 0:
+                result = self._docker_error(
+                    image_name=image_name, tag=tag, image_ref=image_ref,
+                    archive_path="", remote_archive_path="", command_label=command_label,
+                    error_code="E_DOCKER_REMOTE_RUN",
+                    stderr=(run_result.stderr or run_result.stdout).decode("utf-8", errors="replace"),
+                )
+                emit_event(owner="sample_app", phase="tool.docker_build", status="failed", message="대상 서버 docker run이 실패했습니다.", details={"error_code": result["error_code"]})
+                return result
+            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드, 적재, 컨테이너 기동이 완료되었습니다.", details={"image_ref": image_ref, "run_cmd": run_cmd})
+        else:
+            emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "transport": "docker-save-stream"})
+
+        return {
             "ok": True,
             "image_name": image_name,
             "tag": tag,
@@ -365,8 +390,6 @@ class SampleAppTools(BaseTools):
             "stderr": "",
             "error_code": "",
         }
-        emit_event(owner="sample_app", phase="tool.docker_build", status="completed", message="Docker 이미지 빌드와 대상 서버 적재가 완료되었습니다.", details={"image_ref": image_ref, "transport": "docker-save-stream"})
-        return result
 
     def _resolve_packaged_artifact(self, project_dir: Path) -> Path | None:
         gradle_libs = sorted(
