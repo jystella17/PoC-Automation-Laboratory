@@ -10,6 +10,8 @@ from .models import ApplicationFilePlan, ApplicationPlan
 
 TEMPLATE_DIR = Path(__file__).resolve().parent
 BOARD_TEMPLATE_DIR = TEMPLATE_DIR / "templates" / "board"
+SPRING_TEMPLATE_DIR = TEMPLATE_DIR / "spring_template"
+FASTAPI_TEMPLATE_DIR = TEMPLATE_DIR / "fastapi_template"
 DEFAULT_GRADLE_VERSION = "8.14"
 
 
@@ -81,6 +83,14 @@ def gradle_version_for_plan(plan: ApplicationPlan) -> str:
     if "4.0" in plan.framework_version:
         return "8.14"
     return DEFAULT_GRADLE_VERSION
+
+
+def _spring_boot_version(plan: ApplicationPlan) -> str:
+    if "4.0" in plan.framework_version:
+        return "4.0.0"
+    if "3.0" in plan.framework_version:
+        return "3.0.0"
+    return "3.5.0"
 
 
 def fallback_plan(request: UserRequest, project_dir: Path, app_id: str, language: str) -> ApplicationPlan:
@@ -305,107 +315,41 @@ def fallback_spec_markdown(
 
 
 def fallback_pom(plan: ApplicationPlan) -> str:
-    version = "3.5.0"
-    if "4.0" in plan.framework_version:
-        version = "4.0.0"
-    elif "3.0" in plan.framework_version:
-        version = "3.0.0"
-    return (
-        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\" "
-        "xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" "
-        "xsi:schemaLocation=\"http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd\">\n"
-        "  <modelVersion>4.0.0</modelVersion>\n"
-        "  <groupId>com.example</groupId>\n"
-        f"  <artifactId>{plan.app_id}</artifactId>\n"
-        "  <version>0.0.1-SNAPSHOT</version>\n"
-        "  <parent>\n"
-        "    <groupId>org.springframework.boot</groupId>\n"
-        "    <artifactId>spring-boot-starter-parent</artifactId>\n"
-        f"    <version>{version}</version>\n"
-        "    <relativePath/>\n"
-        "  </parent>\n"
-        "  <properties>\n"
-        f"    <java.version>{normalized_runtime_version(plan.runtime_version, default='17')}</java.version>\n"
-        "  </properties>\n"
-        "  <dependencies>\n"
-        "    <dependency>\n"
-        "      <groupId>org.springframework.boot</groupId>\n"
-        "      <artifactId>spring-boot-starter-web</artifactId>\n"
-        "    </dependency>\n"
-        "  </dependencies>\n"
-        "</project>\n"
+    return _load_template(SPRING_TEMPLATE_DIR / "pom.xml.tmpl").substitute(
+        ARTIFACT_ID=plan.app_id,
+        SPRING_BOOT_VERSION=_spring_boot_version(plan),
+        JAVA_VERSION=normalized_runtime_version(plan.runtime_version, default="17"),
     )
 
 
 def fallback_gradle_build(plan: ApplicationPlan) -> str:
-    spring_boot_version = "3.5.0"
-    if "4.0" in plan.framework_version:
-        spring_boot_version = "4.0.0"
-    elif "3.0" in plan.framework_version:
-        spring_boot_version = "3.0.0"
     java_version = normalized_runtime_version(plan.runtime_version, default="17")
-    java_major = java_version.split(".")[0]
-    return (
-        "plugins {\n"
-        "    id 'java'\n"
-        "    id 'org.springframework.boot' version '" + spring_boot_version + "'\n"
-        "    id 'io.spring.dependency-management' version '1.1.7'\n"
-        "}\n\n"
-        "group = 'com.example'\n"
-        "version = '0.0.1-SNAPSHOT'\n\n"
-        "java {\n"
-        "    toolchain {\n"
-        "        languageVersion = JavaLanguageVersion.of(" + java_major + ")\n"
-        "    }\n"
-        "}\n\n"
-        "repositories {\n"
-        "    mavenCentral()\n"
-        "}\n\n"
-        "dependencies {\n"
-        "    implementation 'org.springframework.boot:spring-boot-starter-web'\n"
-        "    implementation 'org.springframework.boot:spring-boot-starter-validation'\n"
-        "    testImplementation 'org.springframework.boot:spring-boot-starter-test'\n"
-        "}\n\n"
-        "tasks.named('test') {\n"
-        "    useJUnitPlatform()\n"
-        "}\n"
+    return _load_template(SPRING_TEMPLATE_DIR / "build.gradle.tmpl").substitute(
+        SPRING_BOOT_VERSION=_spring_boot_version(plan),
+        JAVA_MAJOR_VERSION=java_version.split(".")[0],
     )
 
 
 def fallback_fastapi_main(request: UserRequest, plan: ApplicationPlan) -> str:
-    leak_block = ""
-    if "memory_leak" in plan.special_scenarios:
-        leak_block = (
-            "\nLEAK_BUCKET: list[bytes] = []\n\n"
-            "@app.post('/api/v1/scenario/leak')\n"
-            "def leak():\n"
-            "    LEAK_BUCKET.append(b'x' * 1024 * 1024)\n"
-            "    return {'chunks': len(LEAK_BUCKET)}\n"
-        )
-    return (
-        "from __future__ import annotations\n\n"
-        "import os\nfrom pathlib import Path\n\n"
-        "from fastapi import FastAPI\n\n"
-        "app = FastAPI(title='Generated Sample App', version='0.1.0')\n"
-        f"APP_LOG_DIR = Path(os.getenv('APP_LOG_DIR', '{request.logging.app_log_dir}'))\n"
-        "try:\n    APP_LOG_DIR.mkdir(parents=True, exist_ok=True)\nexcept OSError:\n    pass\n\n"
-        "@app.get('/health')\n"
-        "def health():\n"
-        f"    return {{'status': 'ok', 'framework': '{plan.framework}'}}\n"
-        f"{leak_block}\n"
+    base = _load_template(FASTAPI_TEMPLATE_DIR / "main.py").substitute(
+        APP_LOG_DIR=request.logging.app_log_dir,
+        FRAMEWORK_NAME=plan.framework,
     )
+    if "memory_leak" in plan.special_scenarios:
+        return base + (FASTAPI_TEMPLATE_DIR / "leak_block.py").read_text(encoding="utf-8") + "\n"
+    return base + "\n"
 
 
 def render_dockerfile_template(plan: ApplicationPlan) -> str:
     framework = plan.framework.strip().lower()
     if framework == "fastapi":
-        template_path = TEMPLATE_DIR / "docker_template_python_fastapi.tmpl"
+        template_path = FASTAPI_TEMPLATE_DIR / "docker_template_python_fastapi.tmpl"
         return _load_template(template_path).substitute(
             PYTHON_VERSION=normalized_runtime_version(plan.runtime_version, default="3.12")
         ) + "\n"
 
     template_name = "docker_template_java_gradle.tmpl" if plan.build_system == "gradle" else "docker_template_java_maven.tmpl"
-    template_path = TEMPLATE_DIR / template_name
+    template_path = SPRING_TEMPLATE_DIR / template_name
     artifact_name = plan.artifact_name if plan.artifact_name.endswith(".jar") else f"{plan.app_id}.jar"
     return _load_template(template_path).substitute(
         JAVA_VERSION=normalized_runtime_version(plan.runtime_version, default="17"),
@@ -442,17 +386,7 @@ def resolve_file_content(
 
     # Board application entrypoint
     if path == "src/main/java/com/example/board/BoardApplication.java":
-        return (
-            "package com.example.board;\n\n"
-            "import org.springframework.boot.SpringApplication;\n"
-            "import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n"
-            "@SpringBootApplication\n"
-            "public class BoardApplication {\n"
-            "    public static void main(String[] args) {\n"
-            "        SpringApplication.run(BoardApplication.class, args);\n"
-            "    }\n"
-            "}\n"
-        )
+        return (SPRING_TEMPLATE_DIR / "BoardApplication.java").read_text(encoding="utf-8")
 
     # Dockerfile
     if path == "Dockerfile":
@@ -464,40 +398,31 @@ def resolve_file_content(
     if path == "build.gradle":
         return fallback_gradle_build(plan)
     if path == "settings.gradle":
-        return f"rootProject.name = '{plan.app_id}'\n"
+        return _load_template(SPRING_TEMPLATE_DIR / "settings.gradle.tmpl").substitute(APP_ID=plan.app_id)
 
     # Gradle wrapper files
     if path == "gradlew":
-        return _load_template(TEMPLATE_DIR / "gradlew.tmpl").template + "\n"
+        return _load_template(SPRING_TEMPLATE_DIR / "gradlew.tmpl").template + "\n"
     if path == "gradlew.bat":
-        return _load_template(TEMPLATE_DIR / "gradlew.bat.tmpl").template + "\n"
+        return _load_template(SPRING_TEMPLATE_DIR / "gradlew.bat.tmpl").template + "\n"
     if path == "gradle/wrapper/gradle-wrapper.properties":
-        return _load_template(TEMPLATE_DIR / "gradle-wrapper.properties.tmpl").substitute(
+        return _load_template(SPRING_TEMPLATE_DIR / "gradle-wrapper.properties.tmpl").substitute(
             GRADLE_VERSION=gradle_version_for_plan(plan)
         ) + "\n"
 
     # Spring main class
     if path == spring_main_class_path(plan.app_id):
         cls_name = spring_main_class_name(plan.app_id)
-        return (
-            "package com.example.sampleapp;\n\n"
-            "import org.springframework.boot.SpringApplication;\n"
-            "import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n"
-            "@SpringBootApplication\n"
-            f"public class {cls_name} {{\n"
-            "    public static void main(String[] args) {\n"
-            f"        SpringApplication.run({cls_name}.class, args);\n"
-            "    }\n"
-            "}\n"
-        )
+        content = (SPRING_TEMPLATE_DIR / "SpringApplication.java").read_text(encoding="utf-8")
+        return content.replace("SampleAppApplication", cls_name)
 
     # application.yml
     if path == "src/main/resources/application.yml" or path.endswith("application.yml"):
-        return f"server:\n  port: 8080\nlogging:\n  file:\n    name: {plan.log_dir}/application.log\n"
+        return _load_template(SPRING_TEMPLATE_DIR / "application.yml.tmpl").substitute(LOG_DIR=plan.log_dir)
 
     # Fallback-only paths
     if path == "requirements.txt":
-        return "fastapi\nuvicorn[standard]\n"
+        return (FASTAPI_TEMPLATE_DIR / "requirements.txt").read_text(encoding="utf-8")
     if path == ".env.example":
         return "\n".join(required_env(request) + [f"APP_LOG_DIR={plan.log_dir}"]) + "\n"
     if path == "README.md":
@@ -505,30 +430,8 @@ def resolve_file_content(
     if path == "app/main.py":
         return fallback_fastapi_main(request, plan)
     if path.endswith("SampleAppApplication.java"):
-        return (
-            "package com.example.sampleapp;\n\n"
-            "import org.springframework.boot.SpringApplication;\n"
-            "import org.springframework.boot.autoconfigure.SpringBootApplication;\n\n"
-            "@SpringBootApplication\n"
-            "public class SampleAppApplication {\n"
-            "    public static void main(String[] args) {\n"
-            "        SpringApplication.run(SampleAppApplication.class, args);\n"
-            "    }\n"
-            "}\n"
-        )
+        return (SPRING_TEMPLATE_DIR / "SpringApplication.java").read_text(encoding="utf-8")
     if path.endswith("DemoController.java"):
-        return (
-            "package com.example.sampleapp;\n\n"
-            "import java.util.Map;\n"
-            "import org.springframework.web.bind.annotation.GetMapping;\n"
-            "import org.springframework.web.bind.annotation.RestController;\n\n"
-            "@RestController\n"
-            "public class DemoController {\n"
-            "    @GetMapping(\"/health\")\n"
-            "    public Map<String, Object> health() {\n"
-            f"        return Map.of(\"status\", \"ok\", \"framework\", \"{plan.framework}\");\n"
-            "    }\n"
-            "}\n"
-        )
+        return (SPRING_TEMPLATE_DIR / "DemoController.java").read_text(encoding="utf-8")
 
     return None
