@@ -56,11 +56,6 @@ class SampleAppGeneratorLLM(BaseLLM):
         app_id: str,
     ) -> ApplicationPlan | None:
         with timed_step(logger, "sample_app_gen.llm.plan_application", app_id=app_id):
-            llm = self._create_llm()
-            if llm is None:
-                log_event(logger, "sample_app_gen.llm.plan_application.skipped", reason="llm_not_available")
-                return None
-
             infra_notes = extract_prior_notes(prior_executions, agent_filter="infra_build")
             human_prompt = (
                 "Return JSON only.\n"
@@ -96,8 +91,11 @@ class SampleAppGeneratorLLM(BaseLLM):
                 "Do NOT include bare-metal operation scripts (start.sh, stop.sh, run.sh, deploy.sh) in the file plan — the app is deployed via Docker. "
                 "deployment_commands must contain only 'docker run' commands (e.g. 'docker run -d -p 8080:8080 ...'), never 'docker build' commands."
             )
-            response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
-            payload = self._extract_json(getattr(response, "content", ""))
+            content = self._invoke_llm(SYSTEM_PROMPT, human_prompt)
+            if content is None:
+                log_event(logger, "sample_app_gen.llm.plan_application.skipped", reason="llm_not_available")
+                return None
+            payload = self._extract_json(content)
             if not payload:
                 log_event(logger, "sample_app_gen.llm.plan_application.empty_payload", app_id=app_id)
                 return None
@@ -136,11 +134,6 @@ class SampleAppGeneratorLLM(BaseLLM):
         existing_files: dict[str, str],
     ) -> str | None:
         with timed_step(logger, "sample_app_gen.llm.generate_file", path=file_plan.path):
-            llm = self._create_llm()
-            if llm is None:
-                log_event(logger, "sample_app_gen.llm.generate_file.skipped", path=file_plan.path, reason="llm_not_available")
-                return None
-
             context = self._project_context(existing_files)
             api_registry = self._public_api_registry(existing_files)
             human_prompt = (
@@ -155,14 +148,12 @@ class SampleAppGeneratorLLM(BaseLLM):
                 "The result must be coherent with the rest of the project, use environment variables for secrets, "
                 "and implement explicitly requested failure scenarios only when present."
             )
-            response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
-            content = getattr(response, "content", "")
-            if isinstance(content, str) and content.strip():
-                result = self._strip_code_fences(content)
-                log_event(logger, "sample_app_gen.llm.generate_file.result", path=file_plan.path, size=len(result))
-                return result
-            log_event(logger, "sample_app_gen.llm.generate_file.empty", path=file_plan.path)
-            return None
+            result = self._invoke_llm(SYSTEM_PROMPT, human_prompt, strip_fences=True)
+            if result is None:
+                log_event(logger, "sample_app_gen.llm.generate_file.empty", path=file_plan.path)
+                return None
+            log_event(logger, "sample_app_gen.llm.generate_file.result", path=file_plan.path, size=len(result))
+            return result
 
     def repair_file(
         self,
@@ -174,11 +165,6 @@ class SampleAppGeneratorLLM(BaseLLM):
         existing_files: dict[str, str],
     ) -> str | None:
         with timed_step(logger, "sample_app_gen.llm.repair_file", path=file_plan.path, issue_count=len(issues)):
-            llm = self._create_llm()
-            if llm is None:
-                log_event(logger, "sample_app_gen.llm.repair_file.skipped", path=file_plan.path, reason="llm_not_available")
-                return None
-
             issue_text = "\n".join(f"- {item.path}: {item.message}" for item in issues)
             context = self._project_context(existing_files)
             api_registry = self._public_api_registry(existing_files)
@@ -193,14 +179,12 @@ class SampleAppGeneratorLLM(BaseLLM):
                 f"Other project files (full source):\n{context}\n"
                 "Fix only what is needed to satisfy the validation issues while preserving requested behavior."
             )
-            response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
-            content = getattr(response, "content", "")
-            if isinstance(content, str) and content.strip():
-                result = self._strip_code_fences(content)
-                log_event(logger, "sample_app_gen.llm.repair_file.result", path=file_plan.path, size=len(result))
-                return result
-            log_event(logger, "sample_app_gen.llm.repair_file.empty", path=file_plan.path)
-            return None
+            result = self._invoke_llm(SYSTEM_PROMPT, human_prompt, strip_fences=True)
+            if result is None:
+                log_event(logger, "sample_app_gen.llm.repair_file.empty", path=file_plan.path)
+                return None
+            log_event(logger, "sample_app_gen.llm.repair_file.result", path=file_plan.path, size=len(result))
+            return result
 
     def _extract_json(self, text: str) -> str:
         stripped = text.strip()

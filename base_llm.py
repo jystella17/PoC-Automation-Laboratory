@@ -39,6 +39,30 @@ class BaseLLM:
             timeout=120,
         )
 
+    def _invoke_llm(
+        self,
+        system_prompt: str,
+        human_prompt: str,
+        *,
+        strip_fences: bool = False,
+    ) -> str | None:
+        """Common LLM invocation: create → invoke → extract text → optionally strip fences.
+
+        Returns ``None`` when the LLM is unavailable, raises, or returns empty content.
+        """
+        llm = self._create_llm()
+        if llm is None:
+            return None
+        try:
+            response = llm.invoke([("system", system_prompt), ("human", human_prompt)])
+        except Exception:
+            return None
+        content = getattr(response, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            return None
+        text = content.strip()
+        return self._strip_code_fences(text) if strip_fences else text
+
     def _strip_code_fences(self, text: str) -> str:
         """Remove optional markdown code fences wrapping the response."""
         stripped = text.strip()

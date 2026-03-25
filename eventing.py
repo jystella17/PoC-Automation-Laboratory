@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from datetime import datetime, timezone
 from typing import Any, Callable
+
+from shared.utils import now_iso
 
 EventCallback = Callable[[dict[str, object]], None]
 _EVENT_CALLBACK: ContextVar[EventCallback | None] = ContextVar("global_event_callback", default=None)
@@ -28,7 +29,7 @@ def emit_event(
     if callback is None:
         return
     payload = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now_iso(),
         "owner": owner,
         "phase": phase,
         "status": status,

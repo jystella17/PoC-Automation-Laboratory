@@ -37,6 +37,14 @@ def _settings_path(config_path: str | None) -> Path:
     return Path(config_path or os.getenv("SUPERVISOR_SETTINGS_PATH", str(SETTINGS_PATH)))
 
 
+_ENV_TO_SETTING = {
+    "AZURE_OPENAI_ENDPOINT": "endpoint",
+    "AZURE_OPENAI_API_KEY": "api_key",
+    "AZURE_OPENAI_DEPLOYMENT": "deployment_name",
+    "AZURE_OPENAI_API_VERSION": "api_version",
+}
+
+
 def load_settings(config_path: str | None = None) -> SupervisorSettings:
     path = _settings_path(config_path)
     raw = _load_json_settings(path)
@@ -44,14 +52,10 @@ def load_settings(config_path: str | None = None) -> SupervisorSettings:
 
     if os.getenv("AZURE_OPENAI_ENABLED") is not None:
         azure["enabled"] = os.getenv("AZURE_OPENAI_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-    if os.getenv("AZURE_OPENAI_ENDPOINT"):
-        azure["endpoint"] = os.getenv("AZURE_OPENAI_ENDPOINT")
-    if os.getenv("AZURE_OPENAI_API_KEY"):
-        azure["api_key"] = os.getenv("AZURE_OPENAI_API_KEY")
-    if os.getenv("AZURE_OPENAI_DEPLOYMENT"):
-        azure["deployment_name"] = os.getenv("AZURE_OPENAI_DEPLOYMENT")
-    if os.getenv("AZURE_OPENAI_API_VERSION"):
-        azure["api_version"] = os.getenv("AZURE_OPENAI_API_VERSION")
+    for env_key, setting_key in _ENV_TO_SETTING.items():
+        value = os.getenv(env_key)
+        if value:
+            azure[setting_key] = value
     if os.getenv("AZURE_OPENAI_TEMPERATURE"):
         azure["temperature"] = float(os.getenv("AZURE_OPENAI_TEMPERATURE", "0.1"))
 

@@ -98,26 +98,23 @@ class InfraTools(BaseTools):
     def ssh(self, request: UserRequest, local_script_path: str) -> RemoteExecutionResult:
         target = request.targets[0] if request.targets else None
         if target is None:
-            return self._remote_error(
+            return self._remote_result(
+                ok=False,
                 command_label="ssh --unavailable",
                 error_code="E_SSH_CONNECT",
                 stderr="No target host was provided.",
+                exit_code=1,
             )
 
         command_label = f"ssh --host {target.host} --port {target.ssh_port} --script {local_script_path}"
         emit_event(owner="infra_build", phase="tool.ssh", status="started", message="원격 인프라 적용을 시작합니다.", details={"host": target.host, "script_path": local_script_path})
         if self.dry_run:
-            result = {
-                "ok": True,
-                "exit_code": 0,
-                "stdout": "Dry-run mode enabled. Remote execution skipped.",
-                "stderr": "",
-                "timed_out": False,
-                "command_label": command_label + " --dry-run",
-                "error_code": "",
-            }
             emit_event(owner="infra_build", phase="tool.ssh", status="completed", message="드라이런 모드로 원격 인프라 적용을 건너뛰었습니다.", details={"host": target.host})
-            return result
+            return self._remote_result(
+                ok=True,
+                command_label=command_label + " --dry-run",
+                stdout="Dry-run mode enabled. Remote execution skipped.",
+            )
 
         ssh_cmd = self._build_ssh_command(target)
         try:
@@ -131,52 +128,39 @@ class InfraTools(BaseTools):
                     timeout=900,
                 )
         except subprocess.TimeoutExpired as exc:
-            result = self._remote_error(command_label, "E_SSH_TIMEOUT", str(exc), timed_out=True)
-            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용이 타임아웃되었습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            result = self._remote_result(ok=False, command_label=command_label, error_code="E_SSH_TIMEOUT", stderr=str(exc), exit_code=1, timed_out=True)
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용이 타임아웃되었습니다.", details={"host": target.host, "error_code": "E_SSH_TIMEOUT"})
             return result
         except Exception as exc:  # pragma: no cover
-            result = self._remote_error(command_label, "E_SSH_CONNECT", str(exc))
-            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="SSH 연결에 실패했습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            result = self._remote_result(ok=False, command_label=command_label, error_code="E_SSH_CONNECT", stderr=str(exc), exit_code=1)
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="SSH 연결에 실패했습니다.", details={"host": target.host, "error_code": "E_SSH_CONNECT"})
             return result
 
         if process.returncode != 0:
-            result = {
-                "ok": False,
-                "error_code": "E_REMOTE_EXEC",
-                "stderr": process.stderr,
-                "command_label": command_label,
-                "exit_code": process.returncode,
-                "stdout": process.stdout,
-                "timed_out": False,
-            }
-            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용 명령이 실패했습니다.", details={"host": target.host, "error_code": result["error_code"]})
+            result = self._remote_result(ok=False, command_label=command_label, error_code="E_REMOTE_EXEC", stderr=process.stderr, stdout=process.stdout, exit_code=process.returncode)
+            emit_event(owner="infra_build", phase="tool.ssh", status="failed", message="원격 인프라 적용 명령이 실패했습니다.", details={"host": target.host, "error_code": "E_REMOTE_EXEC"})
             return result
 
-        result = {
-            "ok": True,
-            "exit_code": 0,
-            "stdout": process.stdout,
-            "stderr": process.stderr,
-            "timed_out": False,
-            "command_label": command_label,
-            "error_code": "",
-        }
         emit_event(owner="infra_build", phase="tool.ssh", status="completed", message="원격 인프라 적용이 완료되었습니다.", details={"host": target.host})
-        return result
+        return self._remote_result(ok=True, command_label=command_label, stdout=process.stdout, stderr=process.stderr)
 
-    def _remote_error(
+    def _remote_result(
         self,
+        *,
+        ok: bool,
         command_label: str,
-        error_code: str,
-        stderr: str,
+        error_code: str = "",
+        stderr: str = "",
+        stdout: str = "",
+        exit_code: int = 0,
         timed_out: bool = False,
     ) -> RemoteExecutionResult:
         return {
-            "ok": False,
+            "ok": ok,
+            "command_label": command_label,
             "error_code": error_code,
             "stderr": stderr,
-            "command_label": command_label,
-            "exit_code": 1,
-            "stdout": "",
+            "exit_code": exit_code,
+            "stdout": stdout,
             "timed_out": timed_out,
         }

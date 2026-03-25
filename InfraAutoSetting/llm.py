@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 
 from Supervisor.config import AzureOpenAISettings
 from Supervisor.models import AgentExecution, UserRequest
@@ -51,11 +50,6 @@ class InfraScriptGeneratorLLM(BaseLLM):
             "infra_auto_setting.llm.generate_install_script",
             component_count=len(request.infra_tech_stack.components),
         ):
-            llm = self._create_llm()
-            if llm is None:
-                log_event(logger, "infra_auto_setting.llm.generate_install_script.skipped", reason="llm_not_available")
-                return None
-
             prior_notes = extract_prior_notes(prior_executions)
             human_prompt = (
                 "Return only raw bash script content. No markdown fences.\n"
@@ -76,18 +70,10 @@ class InfraScriptGeneratorLLM(BaseLLM):
                 f"Fallback deterministic script (reference):\n{fallback_script}\n"
             )
 
-            try:
-                response = llm.invoke([("system", SYSTEM_PROMPT), ("human", human_prompt)])
-            except Exception as exc:
-                log_event(logger, "infra_auto_setting.llm.generate_install_script.error", error=str(exc))
+            script = self._invoke_llm(SYSTEM_PROMPT, human_prompt, strip_fences=True)
+            if script is None:
                 return None
 
-            content = getattr(response, "content", "")
-            if not isinstance(content, str) or not content.strip():
-                log_event(logger, "infra_auto_setting.llm.generate_install_script.empty")
-                return None
-
-            script = self._strip_code_fences(content)
             if not self._basic_guard(script):
                 log_event(logger, "infra_auto_setting.llm.generate_install_script.rejected", reason="basic_guard_failed")
                 return None

@@ -58,10 +58,6 @@ class SupervisorLLM(BaseLLM):
         request: UserRequest,
         missing_requirements: list[MissingRequirement],
     ) -> str | None:
-        llm = self._create_llm()
-        if llm is None:
-            return None
-
         components = self._components_str(request)
         languages = self._languages_str(request)
         missing_fields = ", ".join(item.field for item in missing_requirements) or "none"
@@ -77,15 +73,7 @@ class SupervisorLLM(BaseLLM):
             f"Missing fields: {missing_fields}\n"
             "If required fields are missing, explicitly say execution is blocked."
         )
-
-        response = llm.invoke([
-            ("system", SUPERVISOR_SYSTEM_PROMPT),
-            ("human", human_prompt),
-        ])
-        content = getattr(response, "content", "")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        return None
+        return self._invoke_llm(SUPERVISOR_SYSTEM_PROMPT, human_prompt)
 
     def _fallback_summary(self, request: UserRequest, missing_requirements: list[MissingRequirement]) -> str:
         components = self._components_str(request, default="선택된 인프라 구성요소 없음")
@@ -105,10 +93,6 @@ class SupervisorLLM(BaseLLM):
         plan: BuildPlan,
         run_result: SupervisorRunResult | None = None,
     ) -> str | None:
-        llm = self._create_llm()
-        if llm is None:
-            return None
-
         components = self._components_str(request)
         languages = self._languages_str(request)
         step_lines = "\n".join(
@@ -134,15 +118,7 @@ class SupervisorLLM(BaseLLM):
             f"Execution summary:\n{execution_summary}\n"
             "Return a structured answer with these sections if relevant: 요청 내용, 수행할 작업 설명, 실행 결과, 추가 확인 필요."
         )
-
-        response = llm.invoke([
-            ("system", SUPERVISOR_SYSTEM_PROMPT),
-            ("human", human_prompt),
-        ])
-        content = getattr(response, "content", "")
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        return None
+        return self._invoke_llm(SUPERVISOR_SYSTEM_PROMPT, human_prompt)
 
     def _fallback_reply(
         self,
