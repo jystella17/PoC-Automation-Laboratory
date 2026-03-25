@@ -67,7 +67,7 @@ class InfraTools(BaseTools):
                         "severity": "error",
                     }
                 )
-            if request.constraints.sudo_allowed == "no" and re.search(r"(^|\s)sudo\s", content):
+            if request.constraints.sudo_allowed == "no" and re.search(r"(^|\s)sudo\s", content, re.MULTILINE):
                 issues.append(
                     {
                         "code": "V_SUDO_FORBIDDEN",

@@ -13,6 +13,7 @@ from agent_logging import get_agent_logger, log_event, timed_step
 from eventing import emit_event
 from shared.utils import extract_prior_notes
 
+from .cache import ScriptCache
 from .llm import InfraScriptGeneratorLLM
 from .models import GRAPH_EDGES, GRAPH_MERMAID, GRAPH_NODES, InfraBuildRunResult, InfraScriptArtifact
 from .tools import InfraTools, ValidationIssue
@@ -48,6 +49,7 @@ class InfraAutoSettingAgent:
         self.llm = InfraScriptGeneratorLLM(settings or AzureOpenAISettings())
         self.dry_run = (os.getenv("INFRA_AGENT_DRY_RUN", "false").lower() != "false") if dry_run is None else dry_run
         self.tools = InfraTools(dry_run=self.dry_run)
+        self._cache = ScriptCache()
 
     def graph_view(self) -> GraphView:
         return GraphView(nodes=GRAPH_NODES, edges=GRAPH_EDGES, mermaid=GRAPH_MERMAID)
@@ -59,8 +61,15 @@ class InfraAutoSettingAgent:
                 emit_event(owner="infra_build", phase="plan_script", status="started", message="인프라 스크립트 계획을 시작합니다.", details={"components": request.infra_tech_stack.components})
                 resolved_versions, version_notes = self._resolve_versions(request.infra_tech_stack.versions)
                 normalized_request = self._request_with_resolved_versions(request, resolved_versions)
-                script = self._build_script(normalized_request, resolved_versions, prior_executions)
-                emit_event(owner="infra_build", phase="plan_script", status="completed", message="인프라 스크립트 계획이 완료되었습니다.", details={"resolved_versions": resolved_versions})
+                script, cache_note = self._resolve_script(normalized_request, resolved_versions, prior_executions)
+                is_cache_hit = cache_note.startswith("SCRIPT_CACHE_HIT")
+                emit_event(
+                    owner="infra_build",
+                    phase="plan_script",
+                    status="completed",
+                    message="캐시에서 인프라 스크립트를 재사용합니다." if is_cache_hit else "인프라 스크립트 계획이 완료되었습니다.",
+                    details={"resolved_versions": resolved_versions, "cache_status": cache_note},
+                )
                 artifact = self.tools.call(
                     "execution_file_write",
                     path=self._script_path(normalized_request),
@@ -72,6 +81,7 @@ class InfraAutoSettingAgent:
 
                 executed_commands = [f"execution_file_write --path {script_path} --type script"]
                 notes = list(version_notes)
+                notes.append(cache_note)
 
                 validation = self.tools.call("code_validator", script_path=script_path, request=normalized_request)
                 executed_commands.append(f"code_validator --path {script_path}")
@@ -86,14 +96,7 @@ class InfraAutoSettingAgent:
                 executed_commands.append(remote["command_label"])
                 notes.extend(self._runtime_notes(normalized_request))
                 if not remote["ok"]:
-                    notes.extend(
-                        [
-                            f"REMOTE_EXIT_CODE: {remote['exit_code']}",
-                            f"REMOTE_ERROR_CODE: {remote['error_code']}",
-                            f"REMOTE_STDOUT: {remote['stdout'][:400]}" if remote["stdout"] else "REMOTE_STDOUT: none",
-                            f"REMOTE_STDERR: {remote['stderr'][:400]}" if remote["stderr"] else "REMOTE_STDERR: none",
-                        ]
-                    )
+                    notes.extend(self._remote_failure_notes(remote))
 
                 execution = AgentExecution(
                     agent="infra_build",
@@ -112,6 +115,10 @@ class InfraAutoSettingAgent:
                 log_event(logger, "infra_auto_setting.run.exception", error=str(exc))
                 emit_event(owner="infra_build", phase="run", status="failed", message="인프라 Agent 실행 중 예외가 발생했습니다.", details={"error": str(exc)})
                 return self._unexpected_failure_result(str(exc))
+
+    # ------------------------------------------------------------------ #
+    # result builders                                                      #
+    # ------------------------------------------------------------------ #
 
     def _request_with_resolved_versions(self, request: UserRequest, resolved_versions: dict[str, str]) -> UserRequest:
         merged_versions = dict(request.infra_tech_stack.versions)
@@ -176,6 +183,14 @@ class InfraAutoSettingAgent:
             graph=self.graph_view(),
         )
 
+    def _remote_failure_notes(self, remote: dict) -> list[str]:
+        return [
+            f"REMOTE_EXIT_CODE: {remote['exit_code']}",
+            f"REMOTE_ERROR_CODE: {remote['error_code']}",
+            f"REMOTE_STDOUT: {remote['stdout'][:400]}" if remote["stdout"] else "REMOTE_STDOUT: none",
+            f"REMOTE_STDERR: {remote['stderr'][:400]}" if remote["stderr"] else "REMOTE_STDERR: none",
+        ]
+
     def _runtime_notes(self, request: UserRequest) -> list[str]:
         target = self._primary_target(request)
         return [
@@ -188,6 +203,10 @@ class InfraAutoSettingAgent:
 
     def _primary_target(self, request: UserRequest) -> TargetHost | None:
         return request.targets[0] if request.targets else None
+
+    # ------------------------------------------------------------------ #
+    # version resolution                                                   #
+    # ------------------------------------------------------------------ #
 
     def _resolve_versions(self, versions: dict[str, str]) -> tuple[dict[str, str], list[str]]:
         resolved = dict(versions)
@@ -228,14 +247,9 @@ class InfraAutoSettingAgent:
             return requested
         return max(candidates, key=self._version_sort_key)
 
-    def _version_sort_key(self, value: str) -> tuple[int, int, int]:
-        match = re.search(r"\d+(?:\.\d+){0,2}", value)
-        if not match:
-            return 0, 0, 0
-        parts = [int(x) for x in match.group(0).split(".")]
-        while len(parts) < 3:
-            parts.append(0)
-        return parts[0], parts[1], parts[2]
+    # ------------------------------------------------------------------ #
+    # script resolution & caching                                         #
+    # ------------------------------------------------------------------ #
 
     def _script_path(self, request: UserRequest) -> Path:
         target = self._primary_target(request)
@@ -245,23 +259,64 @@ class InfraAutoSettingAgent:
         target_dir.mkdir(parents=True, exist_ok=True)
         return target_dir / f"infra_bootstrap_{safe_host}.sh"
 
-    def _build_script(self, request: UserRequest, versions: dict[str, str], prior_executions: list[AgentExecution]) -> str:
+    def _resolve_script(
+        self,
+        request: UserRequest,
+        resolved_versions: dict[str, str],
+        prior_executions: list[AgentExecution],
+    ) -> tuple[str, str]:
+        """Return (script, cache_note). Serves from cache on hit; generates and stores on miss."""
         package_manager = self._resolve_package_manager(request)
-        fallback_script = self._build_script_fallback(request, versions, prior_executions, package_manager)
-        script = fallback_script
-        script = self._sanitize_generated_script(
-            script=script,
+        cache_key = ScriptCache.build_key(
+            components=request.infra_tech_stack.components,
+            resolved_versions=resolved_versions,
+            package_manager=package_manager,
+            sudo_allowed=request.constraints.sudo_allowed,
+            log_base_dir=request.logging.base_dir,
+            log_gc_dir=request.logging.gc_log_dir,
+            log_app_dir=request.logging.app_log_dir,
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            log_event(logger, "infra_auto_setting.script_cache.hit", key_prefix=cache_key[:12])
+            return cached, f"SCRIPT_CACHE_HIT: {cache_key[:12]}"
+
+        script = self._build_script(request, resolved_versions, prior_executions, package_manager)
+        self._cache.put(
+            cache_key,
+            script,
+            meta={
+                "components": request.infra_tech_stack.components,
+                "versions": resolved_versions,
+                "package_manager": package_manager,
+            },
+        )
+        log_event(logger, "infra_auto_setting.script_cache.miss", key_prefix=cache_key[:12])
+        return script, f"SCRIPT_CACHE_MISS: {cache_key[:12]}"
+
+    # ------------------------------------------------------------------ #
+    # script building                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _build_script(
+        self,
+        request: UserRequest,
+        versions: dict[str, str],
+        prior_executions: list[AgentExecution],
+        package_manager: str,
+    ) -> str:
+        fallback = self._build_script_fallback(request, versions, prior_executions, package_manager)
+        llm_result = self.llm.generate_install_script(
             request=request,
             resolved_versions=versions,
             package_manager=package_manager,
+            prior_executions=prior_executions,
+            fallback_script=fallback,
         )
-        script = self._enforce_logging_directory_policy(script=script, request=request)
-        return self._enforce_java_runtime_policy(
-            script=script,
-            request=request,
-            resolved_versions=versions,
-            package_manager=package_manager,
-        )
+        script = llm_result if llm_result is not None else fallback
+        script = self._sanitize_generated_script(script, request, versions)
+        script = self._enforce_logging_directory_policy(script, request)
+        return self._enforce_java_runtime_policy(script, request, versions, package_manager)
 
     def _build_script_fallback(
         self,
@@ -278,7 +333,6 @@ class InfraAutoSettingAgent:
             f"# sudo_allowed: {request.constraints.sudo_allowed}",
             "",
         ]
-        log_dir_block = self._logging_directory_block(request)
 
         for component in request.infra_tech_stack.components:
             normalized = component.strip().lower()
@@ -286,7 +340,7 @@ class InfraAutoSettingAgent:
             lines.extend(self._component_install_lines(normalized, version, package_manager, request.constraints.sudo_allowed))
             lines.append("")
 
-        lines.extend(log_dir_block)
+        lines.extend(self._logging_directory_block(request))
 
         sample_app_notes = self._sample_app_notes(prior_executions)
         if sample_app_notes:
@@ -300,41 +354,65 @@ class InfraAutoSettingAgent:
 
         if "ubuntu" in os_type or "debian" in os_type:
             return "apt"
-        if "rhel" in os_type or "amazon linux" in os_type or "amzn" in os_type:
+        if any(token in os_type for token in ("rhel", "amazon linux", "amzn", "centos", "rocky", "fedora", "almalinux")):
             return "dnf"
 
         infra_os = request.infra_tech_stack.os.strip().lower()
         return "apt" if infra_os == "linux" else "unknown"
 
     def _component_install_lines(self, component: str, version: str, package_manager: str, sudo_allowed: str) -> list[str]:
+        if component == "java":
+            # Java installation is fully managed by _enforce_java_runtime_policy; skip here.
+            return []
+
         if package_manager == "unknown":
             return [f"echo 'package manager unknown for component: {component}; manual install required'"]
 
-        prefix = "sudo " if sudo_allowed in {"yes", "limited"} else ""
-        quoted_version = shlex.quote(version)
+        prefix = self._sudo_prefix(sudo_allowed)
+        major = self._version_major(version)
 
         if component == "apache":
-            package_name = "apache2" if package_manager == "apt" else "httpd"
-            service_name = "apache2" if package_manager == "apt" else "httpd"
-            return [
-                f"{prefix}{package_manager} -y install {package_name}",
-                f"echo 'apache version target: {quoted_version}'",
-                f"{prefix}systemctl enable --now {service_name}",
-            ]
+            if package_manager == "apt":
+                pkg, service = "apache2", "apache2"
+                install_cmd = (
+                    f"{prefix}apt -y install {shlex.quote(f'apache2={version}*')} 2>/dev/null "
+                    f"|| {prefix}apt -y install {pkg}"
+                )
+            else:
+                pkg, service = "httpd", "httpd"
+                install_cmd = (
+                    f"{prefix}dnf -y install {shlex.quote(f'httpd-{version}*')} 2>/dev/null "
+                    f"|| {prefix}dnf -y install {pkg}"
+                )
+            return [install_cmd, f"{prefix}systemctl enable --now {service}"]
+
         if component == "tomcat":
-            return [
-                f"echo 'tomcat major/minor target: {quoted_version}'",
-                f"{prefix}{package_manager} -y install tomcat || true",
-                f"{prefix}systemctl enable --now tomcat || true",
-            ]
+            versioned_pkg = f"tomcat{major}" if major else "tomcat"
+            if package_manager == "apt":
+                install_cmd = f"{prefix}apt -y install {versioned_pkg}"
+            else:
+                install_cmd = (
+                    f"{prefix}dnf -y install {versioned_pkg} 2>/dev/null "
+                    f"|| {prefix}dnf -y install tomcat"
+                )
+            return [install_cmd, f"{prefix}systemctl enable --now {versioned_pkg}"]
+
         if component == "kafka":
-            return [
-                f"echo 'kafka target: {quoted_version}'",
-                f"{prefix}{package_manager} -y install kafka || true",
-            ]
+            if package_manager == "apt":
+                install_cmd = (
+                    f"{prefix}apt -y install {shlex.quote(f'kafka={version}*')} 2>/dev/null "
+                    f"|| {prefix}apt -y install kafka"
+                )
+            else:
+                install_cmd = (
+                    f"{prefix}dnf -y install {shlex.quote(f'kafka-{version}*')} 2>/dev/null "
+                    f"|| {prefix}dnf -y install kafka"
+                )
+            return [install_cmd]
+
         if component == "pinpoint":
             return [
-                f"echo 'pinpoint target: {quoted_version}'",
+                f"echo 'pinpoint target: {shlex.quote(version)}'",
                 "echo 'pinpoint install requires package/source policy - placeholder step'",
             ]
         return [f"echo 'unsupported component: {component} (skipped)'"]
@@ -345,6 +423,10 @@ class InfraAutoSettingAgent:
             return []
         return merged.splitlines()[:10]
 
+    # ------------------------------------------------------------------ #
+    # script post-processing                                               #
+    # ------------------------------------------------------------------ #
+
     def _enforce_java_runtime_policy(
         self,
         script: str,
@@ -354,7 +436,7 @@ class InfraAutoSettingAgent:
     ) -> str:
         if not self._requires_java(request):
             return script
-        java_major = self._java_major(resolved_versions.get("java", ""))
+        java_major = self._version_major(resolved_versions.get("java", ""))
         if not java_major:
             return script
 
@@ -362,12 +444,13 @@ class InfraAutoSettingAgent:
         if marker in script:
             return script
 
-        prefix = "sudo " if request.constraints.sudo_allowed in {"yes", "limited"} else ""
+        prefix = self._sudo_prefix(request.constraints.sudo_allowed)
         java_package = self._java_package_name(request, package_manager, java_major)
-        if java_package:
-            install_cmd = f"{prefix}{package_manager} -y install {java_package}"
-        else:
-            install_cmd = f"echo 'Unsupported package manager for Java install: {package_manager}'; exit 1"
+        install_cmd = (
+            f"{prefix}{package_manager} -y install {java_package}"
+            if java_package
+            else f"echo 'Unsupported package manager for Java install: {package_manager}'; exit 1"
+        )
 
         java_block = [
             "",
@@ -389,9 +472,8 @@ class InfraAutoSettingAgent:
         script: str,
         request: UserRequest,
         resolved_versions: dict[str, str],
-        package_manager: str,
     ) -> str:
-        java_major = self._java_major(resolved_versions.get("java", ""))
+        java_major = self._version_major(resolved_versions.get("java", ""))
         sanitized_lines: list[str] = []
         skip_install_continuation = False
 
@@ -422,38 +504,40 @@ class InfraAutoSettingAgent:
 
     def _line_mentions_java_or_gradle(self, line: str, java_major: str) -> bool:
         java_pattern = rf"\b(openjdk-{java_major}-jdk|java-{java_major}-openjdk(?:-devel)?|java-{java_major}-amazon-corretto(?:-devel)?)\b" if java_major else r"$^"
-        return bool(re.search(java_pattern, line) or re.search(r"\bgradle\b", line))
-
-    def _continues_shell_command(self, line: str) -> bool:
-        stripped = line.rstrip()
-        return stripped.endswith("\\") or stripped.endswith("&&") or stripped.endswith("||")
+        # Only strip Gradle *install* commands, not comments or env-var references.
+        gradle_install_pattern = r"\b(?:dnf|yum|apt|apt-get)\b.*\bgradle\b"
+        return bool(re.search(java_pattern, line) or re.search(gradle_install_pattern, line))
 
     def _enforce_logging_directory_policy(self, script: str, request: UserRequest) -> str:
+        """Guard: appends logging block if not already present (e.g. in LLM-generated scripts)."""
         marker = "# Provision log directories"
         if marker in script:
             return script
-
         base = script if script.endswith("\n") else script + "\n"
         return base + "\n".join(self._logging_directory_block(request))
 
     def _logging_directory_block(self, request: UserRequest) -> list[str]:
-        prefix = "sudo " if request.constraints.sudo_allowed in {"yes", "limited"} else ""
+        prefix = self._sudo_prefix(request.constraints.sudo_allowed)
+        log_dirs = " ".join(
+            shlex.quote(d)
+            for d in (request.logging.base_dir, request.logging.gc_log_dir, request.logging.app_log_dir)
+        )
         return [
             "# Provision log directories",
-            f"{prefix}mkdir -p {shlex.quote(request.logging.base_dir)} {shlex.quote(request.logging.gc_log_dir)} {shlex.quote(request.logging.app_log_dir)}",
-            f"{prefix}chmod 755 {shlex.quote(request.logging.base_dir)} {shlex.quote(request.logging.gc_log_dir)} {shlex.quote(request.logging.app_log_dir)}",
+            f"{prefix}mkdir -p {log_dirs}",
+            f"{prefix}chmod 755 {log_dirs}",
             "",
         ]
 
     def _is_logging_directory_line(self, line: str, request: UserRequest) -> bool:
-        logging_paths = (
-            request.logging.base_dir,
-            request.logging.gc_log_dir,
-            request.logging.app_log_dir,
-        )
+        logging_paths = (request.logging.base_dir, request.logging.gc_log_dir, request.logging.app_log_dir)
         if not any(path in line for path in logging_paths):
             return False
         return "mkdir -p" in line or re.search(r"\bchmod\s+755\b", line) is not None
+
+    # ------------------------------------------------------------------ #
+    # Java helpers                                                         #
+    # ------------------------------------------------------------------ #
 
     def _java_package_name(self, request: UserRequest, package_manager: str, java_major: str) -> str:
         target = self._primary_target(request)
@@ -461,12 +545,10 @@ class InfraAutoSettingAgent:
 
         if package_manager == "apt":
             return f"openjdk-{java_major}-jdk"
-
         if package_manager == "dnf":
             if "amazon linux" in os_type or "amzn" in os_type:
                 return f"java-{java_major}-amazon-corretto-devel"
             return f"java-{java_major}-openjdk-devel"
-
         return ""
 
     def _requires_java(self, request: UserRequest) -> bool:
@@ -479,9 +561,34 @@ class InfraAutoSettingAgent:
             return True
         return any(language.startswith("java") for language in languages)
 
-    def _java_major(self, source: str) -> str:
+    # ------------------------------------------------------------------ #
+    # static utilities                                                     #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _sudo_prefix(sudo_allowed: str) -> str:
+        return "sudo " if sudo_allowed in {"yes", "limited"} else ""
+
+    @staticmethod
+    def _version_major(source: str) -> str:
+        """Extract the leading integer from a version string (e.g. '10.1.36' → '10')."""
         value = source.strip()
         if not value:
             return ""
         match = re.search(r"\d+", value)
         return match.group(0) if match else ""
+
+    @staticmethod
+    def _version_sort_key(value: str) -> tuple[int, int, int]:
+        match = re.search(r"\d+(?:\.\d+){0,2}", value)
+        if not match:
+            return 0, 0, 0
+        parts = [int(x) for x in match.group(0).split(".")]
+        while len(parts) < 3:
+            parts.append(0)
+        return parts[0], parts[1], parts[2]
+
+    @staticmethod
+    def _continues_shell_command(line: str) -> bool:
+        stripped = line.rstrip()
+        return stripped.endswith("\\") or stripped.endswith("&&") or stripped.endswith("||")
