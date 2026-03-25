@@ -83,6 +83,24 @@ class SampleAppTools(BaseTools):
                 dockerfile = existing_files.get("Dockerfile", "")
                 if dockerfile and "uvicorn" not in dockerfile:
                     issues.append(ValidationIssue(path="Dockerfile", message="FastAPI Dockerfile must run uvicorn."))
+                fastapi_board_required_files = {
+                    "app/board/__init__.py",
+                    "app/board/models.py",
+                    "app/board/schemas.py",
+                    "app/board/repository.py",
+                    "app/board/service.py",
+                    "app/board/router.py",
+                    "app/board/exceptions.py",
+                }
+                if any(path.startswith("app/board/") for path in existing_files):
+                    missing_board = sorted(path for path in fastapi_board_required_files if path not in existing_files)
+                    for path in missing_board:
+                        issues.append(
+                            ValidationIssue(
+                                path=path,
+                                message="Board CRUD source set is incomplete. Required supporting file is missing.",
+                            )
+                        )
             elif normalized in {"spring", "spring boot"}:
                 has_pom = any(Path(path).name == "pom.xml" for path in existing_files)
                 has_gradle = any(Path(path).name in {"build.gradle", "build.gradle.kts"} for path in existing_files)
@@ -129,12 +147,13 @@ class SampleAppTools(BaseTools):
                         )
                     )
                 board_required_files = {
+                    "src/main/java/com/example/board/BoardApplication.java",
                     "src/main/java/com/example/board/model/Post.java",
                     "src/main/java/com/example/board/dto/PostRequest.java",
                     "src/main/java/com/example/board/dto/PostResponse.java",
                     "src/main/java/com/example/board/repository/InMemoryPostRepository.java",
                     "src/main/java/com/example/board/service/PostService.java",
-                    "src/main/java/com/example/board/controller/BoardController.java",
+                    "src/main/java/com/example/board/controller/PostController.java",
                     "src/main/java/com/example/board/exception/NotFoundException.java",
                     "src/main/java/com/example/board/exception/GlobalExceptionHandler.java",
                 }

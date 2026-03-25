@@ -1,0 +1,13 @@
+FROM gradle:${GRADLE_VERSION}-jdk${JAVA_VERSION} AS builder
+
+WORKDIR /workspace
+COPY build.gradle settings.gradle ./
+COPY src ./src
+RUN gradle clean bootJar --no-daemon && cp build/libs/*.jar /tmp/app.jar
+
+FROM eclipse-temurin:${JAVA_VERSION}-jre
+
+WORKDIR /app
+COPY --from=builder /tmp/app.jar /app/${ARTIFACT_NAME}
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app/${ARTIFACT_NAME}"]

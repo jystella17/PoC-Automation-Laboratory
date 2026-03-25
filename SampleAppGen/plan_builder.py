@@ -9,14 +9,20 @@ from Supervisor.models import UserRequest
 from .models import ApplicationFilePlan, ApplicationPlan
 
 TEMPLATE_DIR = Path(__file__).resolve().parent
-BOARD_TEMPLATE_DIR = TEMPLATE_DIR / "templates" / "board"
 SPRING_TEMPLATE_DIR = TEMPLATE_DIR / "spring_template"
 FASTAPI_TEMPLATE_DIR = TEMPLATE_DIR / "fastapi_template"
+BOARD_TEMPLATE_DIR = SPRING_TEMPLATE_DIR / "board"
+FASTAPI_BOARD_TEMPLATE_DIR = FASTAPI_TEMPLATE_DIR / "board"
 DEFAULT_GRADLE_VERSION = "8.14"
 
 
 def _load_board_template(relative_path: str) -> str:
     path = BOARD_TEMPLATE_DIR / relative_path
+    return path.read_text(encoding="utf-8")
+
+
+def _load_fastapi_board_template(relative_path: str) -> str:
+    path = FASTAPI_BOARD_TEMPLATE_DIR / relative_path
     return path.read_text(encoding="utf-8")
 
 
@@ -220,15 +226,16 @@ def ensure_required_file_plan(
         if any(path.startswith("src/main/java/com/example/board/") for path in existing_paths):
             required.extend(
                 [
+                    ApplicationFilePlan(path="src/main/java/com/example/board/BoardApplication.java", purpose="Spring Boot application entrypoint", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/model/Post.java", purpose="Board domain model", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/dto/PostRequest.java", purpose="Board create/update request DTO", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/dto/PostResponse.java", purpose="Board response DTO", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/repository/InMemoryPostRepository.java", purpose="In-memory board repository", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/service/PostService.java", purpose="Board service layer", language="java"),
-                    ApplicationFilePlan(path="src/main/java/com/example/board/controller/BoardController.java", purpose="Board REST controller", language="java"),
+                    ApplicationFilePlan(path="src/main/java/com/example/board/controller/PostController.java", purpose="Board REST controller", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/exception/NotFoundException.java", purpose="Board not found exception", language="java"),
                     ApplicationFilePlan(path="src/main/java/com/example/board/exception/GlobalExceptionHandler.java", purpose="Board exception handler", language="java"),
-                    ApplicationFilePlan(path="src/test/java/com/example/board/BoardControllerTest.java", purpose="Board controller integration test", language="java"),
+                    ApplicationFilePlan(path="src/test/java/com/example/board/PostControllerTest.java", purpose="Board controller integration test", language="java"),
                 ]
             )
         if not has_declared_entrypoint:
@@ -243,6 +250,20 @@ def ensure_required_file_plan(
                 ApplicationFilePlan(path="Dockerfile", purpose="Container build file", language="dockerfile"),
             ]
         )
+        if any(path.startswith("app/board/") for path in existing_paths):
+            required.extend(
+                [
+                    ApplicationFilePlan(path="app/board/__init__.py", purpose="Board package init", language="python"),
+                    ApplicationFilePlan(path="app/board/models.py", purpose="Board domain model", language="python"),
+                    ApplicationFilePlan(path="app/board/schemas.py", purpose="Board request/response schemas", language="python"),
+                    ApplicationFilePlan(path="app/board/repository.py", purpose="In-memory board repository", language="python"),
+                    ApplicationFilePlan(path="app/board/service.py", purpose="Board service layer", language="python"),
+                    ApplicationFilePlan(path="app/board/router.py", purpose="Board REST router", language="python"),
+                    ApplicationFilePlan(path="app/board/exceptions.py", purpose="Board exception handlers", language="python"),
+                    ApplicationFilePlan(path="app/board/tests/__init__.py", purpose="Board tests package init", language="python"),
+                    ApplicationFilePlan(path="app/board/tests/test_board_router.py", purpose="Board router integration test", language="python"),
+                ]
+            )
 
     merged = list(file_plan)
     for item in required:
@@ -330,16 +351,6 @@ def fallback_gradle_build(plan: ApplicationPlan) -> str:
     )
 
 
-def fallback_fastapi_main(request: UserRequest, plan: ApplicationPlan) -> str:
-    base = _load_template(FASTAPI_TEMPLATE_DIR / "main.py").substitute(
-        APP_LOG_DIR=request.logging.app_log_dir,
-        FRAMEWORK_NAME=plan.framework,
-    )
-    if "memory_leak" in plan.special_scenarios:
-        return base + (FASTAPI_TEMPLATE_DIR / "leak_block.py").read_text(encoding="utf-8") + "\n"
-    return base + "\n"
-
-
 def render_dockerfile_template(plan: ApplicationPlan) -> str:
     framework = plan.framework.strip().lower()
     if framework == "fastapi":
@@ -359,15 +370,28 @@ def render_dockerfile_template(plan: ApplicationPlan) -> str:
 
 
 _BOARD_FILE_MAP = {
+    "src/main/java/com/example/board/BoardApplication.java": "BoardApplication.java",
     "src/main/java/com/example/board/model/Post.java": "model/Post.java",
     "src/main/java/com/example/board/dto/PostRequest.java": "dto/PostRequest.java",
     "src/main/java/com/example/board/dto/PostResponse.java": "dto/PostResponse.java",
     "src/main/java/com/example/board/repository/InMemoryPostRepository.java": "repository/InMemoryPostRepository.java",
     "src/main/java/com/example/board/service/PostService.java": "service/PostService.java",
-    "src/main/java/com/example/board/controller/BoardController.java": "controller/BoardController.java",
+    "src/main/java/com/example/board/controller/PostController.java": "controller/PostController.java",
     "src/main/java/com/example/board/exception/NotFoundException.java": "exception/NotFoundException.java",
     "src/main/java/com/example/board/exception/GlobalExceptionHandler.java": "exception/GlobalExceptionHandler.java",
-    "src/test/java/com/example/board/BoardControllerTest.java": "test/BoardControllerTest.java",
+    "src/test/java/com/example/board/PostControllerTest.java": "test/PostControllerTest.java",
+}
+
+_FASTAPI_BOARD_FILE_MAP = {
+    "app/board/__init__.py": "__init__.py",
+    "app/board/models.py": "models.py",
+    "app/board/schemas.py": "schemas.py",
+    "app/board/repository.py": "repository.py",
+    "app/board/service.py": "service.py",
+    "app/board/router.py": "router.py",
+    "app/board/exceptions.py": "exceptions.py",
+    "app/board/tests/__init__.py": "tests/__init__.py",
+    "app/board/tests/test_board_router.py": "tests/test_board_router.py",
 }
 
 
@@ -379,14 +403,15 @@ def resolve_file_content(
     """Unified deterministic content resolver (merges D-9: _deterministic + _fallback)."""
     path = file_plan.path
 
-    # Board templates from files
+    # Spring Board templates from files
     board_template = _BOARD_FILE_MAP.get(path)
     if board_template is not None:
         return _load_board_template(board_template)
 
-    # Board application entrypoint
-    if path == "src/main/java/com/example/board/BoardApplication.java":
-        return (SPRING_TEMPLATE_DIR / "BoardApplication.java").read_text(encoding="utf-8")
+    # FastAPI Board templates from files
+    fastapi_board_template = _FASTAPI_BOARD_FILE_MAP.get(path)
+    if fastapi_board_template is not None:
+        return _load_fastapi_board_template(fastapi_board_template)
 
     # Dockerfile
     if path == "Dockerfile":
@@ -410,28 +435,18 @@ def resolve_file_content(
             GRADLE_VERSION=gradle_version_for_plan(plan)
         ) + "\n"
 
-    # Spring main class
-    if path == spring_main_class_path(plan.app_id):
-        cls_name = spring_main_class_name(plan.app_id)
-        content = (SPRING_TEMPLATE_DIR / "SpringApplication.java").read_text(encoding="utf-8")
-        return content.replace("SampleAppApplication", cls_name)
-
     # application.yml
     if path == "src/main/resources/application.yml" or path.endswith("application.yml"):
         return _load_template(SPRING_TEMPLATE_DIR / "application.yml.tmpl").substitute(LOG_DIR=plan.log_dir)
 
+    # FastAPI entrypoint
+    if path == "app/main.py":
+        return (FASTAPI_TEMPLATE_DIR / "main.py").read_text(encoding="utf-8")
+
     # Fallback-only paths
-    if path == "requirements.txt":
-        return (FASTAPI_TEMPLATE_DIR / "requirements.txt").read_text(encoding="utf-8")
     if path == ".env.example":
         return "\n".join(required_env(request) + [f"APP_LOG_DIR={plan.log_dir}"]) + "\n"
     if path == "README.md":
         return f"# Generated Sample App\n\n- framework: {plan.framework}\n- language: {plan.language}\n"
-    if path == "app/main.py":
-        return fallback_fastapi_main(request, plan)
-    if path.endswith("SampleAppApplication.java"):
-        return (SPRING_TEMPLATE_DIR / "SpringApplication.java").read_text(encoding="utf-8")
-    if path.endswith("DemoController.java"):
-        return (SPRING_TEMPLATE_DIR / "DemoController.java").read_text(encoding="utf-8")
 
     return None
