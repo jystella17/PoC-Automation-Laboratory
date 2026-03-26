@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="ko" data-theme="light">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=1720, height=960, initial-scale=1.0" />
+    <title>Infra Test Lab 시스템 아키텍처</title>
+
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet" />
+    <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&display=swap" rel="stylesheet" />
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            width: 1720px;
+            height: 960px;
+            font-family: 'Noto Sans KR', sans-serif;
+            background-color: #f8fafc;
+            overflow: hidden;
+        }
+
+        .slide-container {
+            display: flex;
+            flex-direction: column;
+            width: 1720px;
+            height: 960px;
+            padding: 40px 44px 28px 44px;
+            box-sizing: border-box;
+        }
+
+        .diagram-container {
+            position: relative;
+            flex: 1;
+            width: 1640px;
+            margin: 0 auto;
+            min-height: 0;
+            padding-bottom: 52px;
+        }
+
+        .node {
+            position: absolute;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 6px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.05);
+            padding: 16px 18px;
+            box-sizing: border-box;
+            border-top-width: 5px;
+            border-style: solid;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            z-index: 10;
+            overflow: hidden;
+        }
+
+        .node-title {
+            font-weight: 700;
+            font-size: 18px;
+            line-height: 1.3;
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 2px;
+            white-space: normal;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .node-title i {
+            flex: 0 0 auto;
+            margin-top: 3px;
+        }
+
+        .node-title p {
+            margin: 0;
+            flex: 1 1 auto;
+            min-width: 0;
+            white-space: normal;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .node-desc {
+            font-size: 14px;
+            color: #4b5563;
+            line-height: 1.5;
+            margin: 0;
+            white-space: normal;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .node-desc p {
+            margin: 0;
+        }
+
+        .node-list {
+            font-size: 13px;
+            color: #6b7280;
+            line-height: 1.5;
+        }
+
+        .node-list p {
+            display: flex;
+            align-items: flex-start;
+            gap: 7px;
+            margin: 0 0 5px 0;
+            white-space: normal;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .node-list p:last-child {
+            margin-bottom: 0;
+        }
+
+        .node-list p i {
+            flex: 0 0 auto;
+            margin-top: 3px;
+        }
+
+        /* Node positions */
+        .node-user {
+            left: 20px;
+            top: 32px;
+            width: 230px;
+            min-height: 128px;
+            border-color: #64748b;
+            background-color: #f8fafc;
+        }
+
+        .node-fastapi {
+            left: 340px;
+            top: 32px;
+            width: 290px;
+            min-height: 138px;
+            border-color: #0ea5e9;
+            background-color: #f0f9ff;
+        }
+
+        .node-supervisor {
+            left: 760px;
+            top: 32px;
+            width: 320px;
+            min-height: 142px;
+            border-color: #8b5cf6;
+            background-color: #f5f3ff;
+        }
+
+        .node-llm {
+            left: 1360px;
+            top: 32px;
+            width: 250px;
+            min-height: 122px;
+            border-color: #0d9488;
+            background-color: #f0fdfa;
+        }
+
+        .node-redis {
+            left: 365px;
+            top: 290px;
+            width: 305px;
+            min-height: 146px;
+            border-color: #ef4444;
+            background-color: #fef2f2;
+        }
+
+        .node-infra {
+            left: 150px;
+            top: 500px;
+            width: 330px;
+            min-height: 165px;
+            border-color: #3b82f6;
+            background-color: #eff6ff;
+        }
+
+        .node-app {
+            left: 980px;
+            top: 500px;
+            width: 330px;
+            min-height: 165px;
+            border-color: #10b981;
+            background-color: #ecfdf5;
+        }
+
+        .node-target {
+            left: 560px;
+            top: 500px;
+            width: 330px;
+            min-height: 148px;
+            border-color: #f97316;
+            background-color: #fff7ed;
+        }
+
+        .svg-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        .path-line {
+            fill: none;
+            stroke: #94a3b8;
+            stroke-width: 2.6;
+            stroke-dasharray: 5 5;
+        }
+
+        .path-line-solid {
+            fill: none;
+            stroke: #64748b;
+            stroke-width: 3.2;
+        }
+
+        .edge-label {
+            position: absolute;
+            z-index: 30;
+            font-size: 12px;
+            font-weight: 700;
+            color: #475569;
+            background: rgba(248, 250, 252, 0.96);
+            padding: 3px 9px;
+            border-radius: 999px;
+            line-height: 1.2;
+            white-space: nowrap;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+            pointer-events: none;
+        }
+
+        .edge-label-dash {
+            color: #64748b;
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px dashed #cbd5e1;
+        }
+
+        footer {
+            margin-top: 28px;
+            padding-top: 14px;
+            border-top: 1px solid #e5e7eb;
+            flex-shrink: 0;
+        }
+
+        footer p {
+            margin: 0;
+        }
+    </style>
+</head>
+<body>
+<div class="slide-container">
+
+    <header class="flex justify-between items-end mb-6">
+        <div>
+            <h1 class="text-4xl font-bold text-gray-800 mb-2">Infra Test Lab 시스템 아키텍처</h1>
+            <h2 class="text-xl text-gray-500">FastAPI · Celery · Redis 기반 비동기 Multi-Agent 오케스트레이션</h2>
+        </div>
+    </header>
+
+    <div class="diagram-container">
+
+        <svg class="svg-layer" viewBox="0 0 1640 760" preserveAspectRatio="none">
+            <defs>
+                <marker id="arrow-end" markerWidth="6" markerHeight="6" refX="9" refY="5" orient="auto" viewBox="0 0 10 10">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"></path>
+                </marker>
+                <marker id="arrow-end-dash" markerWidth="6" markerHeight="6" refX="9" refY="5" orient="auto" viewBox="0 0 10 10">
+                    <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"></path>
+                </marker>
+            </defs>
+
+            <!-- User -> FastAPI -->
+            <path class="path-line-solid" d="M 250 96 L 340 96" marker-end="url(#arrow-end)"></path>
+
+            <!-- FastAPI -> Supervisor -->
+            <path class="path-line-solid" d="M 630 96 L 760 96" marker-end="url(#arrow-end)"></path>
+
+            <!-- FastAPI -> Redis -->
+            <path class="path-line-solid" d="M 510 170 L 510 290" marker-end="url(#arrow-end)"></path>
+
+            <!-- Redis -> Supervisor : cache lookup -->
+            <path class="path-line" d="M 670 335 C 760 315 790 245 820 174" marker-end="url(#arrow-end-dash)"></path>
+
+            <!-- Supervisor -> LLM -->
+            <path class="path-line-solid" d="M 1080 96 L 1360 96" marker-end="url(#arrow-end)"></path>
+
+            <!-- LLM -> Redis -->
+            <path class="path-line" d="M 1485 154 C 1430 260 1130 305 670 360" marker-end="url(#arrow-end-dash)"></path>
+
+            <!-- Redis -> User (SSE) -->
+            <path class="path-line" d="M 365 360 C 190 360 150 220 150 160" marker-end="url(#arrow-end-dash)"></path>
+
+            <!-- Supervisor -> Infra : cache miss -->
+            <path class="path-line-solid" d="M 800 174 C 735 325 535 405 315 520" marker-end="url(#arrow-end)"></path>
+
+            <!-- Supervisor -> App -->
+            <path class="path-line-solid" d="M 980 174 C 1010 315 1110 385 1150 500" marker-end="url(#arrow-end)"></path>
+
+            <!-- Infra -> Target -->
+            <path class="path-line-solid" d="M 315 580 L 560 580" marker-end="url(#arrow-end)"></path>
+
+            <!-- App -> Target -->
+            <path class="path-line-solid" d="M 980 580 L 890 580" marker-end="url(#arrow-end)"></path>
+        </svg>
+
+        <!-- Edge labels -->
+        <div class="edge-label" style="left: 260px; top: 78px;">폼 입력</div>
+        <div class="edge-label" style="left: 650px; top: 78px;">Agent 호출</div>
+        <div class="edge-label" style="left: 460px; top: 210px;">Job Enqueue</div>
+        <div class="edge-label edge-label-dash" style="left: 730px; top: 280px;">Cache Lookup</div>
+        <div class="edge-label" style="left: 1110px; top: 78px;">실행 계획/입력값 검증/최종 응답 생성</div>
+        <div class="edge-label edge-label-dash" style="left: 1130px; top: 270px;">Log / Cache</div>
+        <div class="edge-label edge-label-dash" style="left: 195px; top: 280px;">SSE</div>
+        <div class="edge-label" style="left: 170px; top: 450px;">Cache Miss → Infra Agent 호출</div>
+        <div class="edge-label" style="left: 1050px; top: 350px;">App Task</div>
+
+        <!-- User -->
+        <div class="node node-user">
+            <div class="node-title text-slate-700">
+                <i class="fas fa-desktop text-slate-500"></i>
+                <p>Streamlit UI</p>
+            </div>
+            <div class="node-desc">
+                <p>테스트 스펙 정의 및 실행 요청</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-check text-slate-400"></i> 인프라 / 앱 폼 입력</p>
+                <p><i class="fas fa-spinner text-slate-400"></i> 진행 상태 실시간 확인</p>
+            </div>
+        </div>
+
+        <!-- FastAPI -->
+        <div class="node node-fastapi">
+            <div class="node-title text-sky-700">
+                <i class="fas fa-server text-sky-500"></i>
+                <p>FastAPI Backend</p>
+            </div>
+            <div class="node-desc">
+                <p>REST API 및 비동기 실행 제어</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-route text-sky-400"></i> /v1/supervisor/run-async</p>
+                <p><i class="fas fa-rss text-sky-400"></i> SSE 실시간 이벤트 스트림</p>
+            </div>
+        </div>
+
+        <!-- Supervisor -->
+        <div class="node node-supervisor">
+            <div class="node-title text-purple-700">
+                <i class="fas fa-network-wired text-purple-500"></i>
+                <p>Supervisor (Celery Worker)</p>
+            </div>
+            <div class="node-desc">
+                <p>캐시 확인 후 Agent 실행 여부를 판단하는 오케스트레이터</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-project-diagram text-purple-400"></i> LangGraph 상태 그래프</p>
+                <p><i class="fas fa-search text-purple-400"></i> Redis 캐시 조회 후 분기</p>
+                <p><i class="fas fa-tasks text-purple-400"></i> BuildPlan 생성 및 Agent 위임</p>
+            </div>
+        </div>
+
+        <!-- LLM -->
+        <div class="node node-llm">
+            <div class="node-title text-teal-700">
+                <i class="fas fa-brain text-teal-500"></i>
+                <p>Azure OpenAI</p>
+            </div>
+            <div class="node-desc">
+                <p>계획 요약, 스크립트 / 코드 생성</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-robot text-teal-400"></i> 스크립트 생성</p>
+                <p><i class="fas fa-comment-dots text-teal-400"></i> Chat Reply</p>
+            </div>
+        </div>
+
+        <!-- Redis -->
+        <div class="node node-redis">
+            <div class="node-title text-red-700">
+                <i class="fas fa-database text-red-500"></i>
+                <p>Redis (State &amp; Cache)</p>
+            </div>
+            <div class="node-desc">
+                <p>브로커, 이벤트 저장, 인프라 스크립트 캐시</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-bolt text-red-400"></i> Celery Message Broker</p>
+                <p><i class="fas fa-list-ul text-red-400"></i> Event Store / 상태 관리</p>
+                <p><i class="fas fa-history text-red-400"></i> Cached Infra Script 저장</p>
+            </div>
+        </div>
+
+        <!-- Infra -->
+        <div class="node node-infra">
+            <div class="node-title text-blue-700">
+                <i class="fas fa-server text-blue-500"></i>
+                <p>Infra Agent</p>
+            </div>
+            <div class="node-desc">
+                <p>캐시 미존재 시 설치 스크립트를 생성하고 원격 서버에 적용</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-terminal text-blue-400"></i> Bash 스크립트 생성 / 검증</p>
+                <p><i class="fas fa-shield-alt text-blue-400"></i> 버전 보정 및 sudo 정책</p>
+                <p><i class="fas fa-save text-blue-400"></i> 생성 스크립트 Redis 캐시 저장</p>
+            </div>
+        </div>
+
+        <!-- App -->
+        <div class="node node-app">
+            <div class="node-title text-green-700">
+                <i class="fas fa-layer-group text-green-500"></i>
+                <p>Application Agent</p>
+            </div>
+            <div class="node-desc">
+                <p>샘플 앱 생성, 검증, 패키징 및 배포</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fas fa-code text-green-400"></i> Spring Boot / FastAPI 앱 생성</p>
+                <p><i class="fas fa-wrench text-green-400"></i> 정적 검증 및 자동 Repair</p>
+                <p><i class="fas fa-box text-green-400"></i> JAR 빌드 및 Docker 이미지 생성</p>
+            </div>
+        </div>
+
+        <!-- Target -->
+        <div class="node node-target">
+            <div class="node-title text-orange-700">
+                <i class="fas fa-network-wired text-orange-500"></i>
+                <p>Target Server</p>
+            </div>
+            <div class="node-desc">
+                <p>인프라 구성 및 샘플 앱이 실제로 배포되는 실행 환경</p>
+            </div>
+            <div class="node-list">
+                <p><i class="fab fa-linux text-orange-400"></i> OS: Ubuntu, RHEL</p>
+                <p><i class="fas fa-cogs text-orange-400"></i> Apache, Tomcat, Kafka</p>
+                <p><i class="fab fa-docker text-orange-400"></i> Docker Runtime</p>
+                <p><i class="fas fa-key text-orange-400"></i> SSH 인증 기반 접근</p>
+            </div>
+        </div>
+
+    </div>
+
+    <footer class="flex items-center justify-center gap-10">
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fas fa-server text-sky-500 text-2xl"></i>
+            <p class="font-medium text-base">FastAPI</p>
+        </div>
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fas fa-cogs text-yellow-600 text-2xl"></i>
+            <p class="font-medium text-base">Celery Worker</p>
+        </div>
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fas fa-database text-red-500 text-2xl"></i>
+            <p class="font-medium text-base">Redis Broker</p>
+        </div>
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fas fa-project-diagram text-purple-500 text-2xl"></i>
+            <p class="font-medium text-base">LangGraph</p>
+        </div>
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fas fa-brain text-teal-500 text-2xl"></i>
+            <p class="font-medium text-base">Azure OpenAI</p>
+        </div>
+        <div class="flex items-center gap-2 text-gray-600">
+            <i class="fab fa-docker text-blue-500 text-2xl"></i>
+            <p class="font-medium text-base">Docker</p>
+        </div>
+    </footer>
+</div>
+</body>
+</html>
