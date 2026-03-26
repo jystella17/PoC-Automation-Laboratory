@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -35,6 +36,7 @@ DEFAULT_ROLLBACK_CLEANUP = [
     "restore changed config backups",
     "remove temporary install artifacts",
 ]
+PROTECTED_PATH_PREFIXES = ("/var", "/etc", "/usr", "/opt")
 
 
 class InfraAutoSettingAgent:
@@ -92,11 +94,15 @@ class InfraAutoSettingAgent:
                         issues=validation["issues"],
                     )
 
+                emit_event(owner="infra_build", phase="remote_execute", status="started", message="대상 서버에서 스크립트를 실행합니다.")
                 remote = self.tools.call("ssh", request=normalized_request, local_script_path=script_path)
                 executed_commands.append(remote["command_label"])
                 notes.extend(self._runtime_notes(normalized_request))
-                if not remote["ok"]:
+                if remote["ok"]:
+                    emit_event(owner="infra_build", phase="remote_execute", status="completed", message="원격 스크립트 실행이 성공했습니다.")
+                else:
                     notes.extend(self._remote_failure_notes(remote))
+                    emit_event(owner="infra_build", phase="remote_execute", status="failed", message="원격 스크립트 실행에 실패했습니다.", details={"exit_code": remote["exit_code"], "error_code": remote["error_code"]})
 
                 execution = AgentExecution(
                     agent="infra_build",
@@ -187,8 +193,8 @@ class InfraAutoSettingAgent:
         return [
             f"REMOTE_EXIT_CODE: {remote['exit_code']}",
             f"REMOTE_ERROR_CODE: {remote['error_code']}",
-            f"REMOTE_STDOUT: {remote['stdout'][:400]}" if remote["stdout"] else "REMOTE_STDOUT: none",
-            f"REMOTE_STDERR: {remote['stderr'][:400]}" if remote["stderr"] else "REMOTE_STDERR: none",
+            f"REMOTE_STDOUT: {remote['stdout'][:2000]}" if remote["stdout"] else "REMOTE_STDOUT: none",
+            f"REMOTE_STDERR: {remote['stderr'][:2000]}" if remote["stderr"] else "REMOTE_STDERR: none",
         ]
 
     def _runtime_notes(self, request: UserRequest) -> list[str]:
@@ -278,8 +284,17 @@ class InfraAutoSettingAgent:
         )
         cached = self._cache.get(cache_key)
         if cached is not None:
+            cached_issues = self._validate_script_content(cached, request, resolved_versions, package_manager)
+            if not cached_issues:
+                log_event(logger, "infra_auto_setting.script_cache.hit", key_prefix=cache_key[:12])
+                return cached, f"SCRIPT_CACHE_HIT: {cache_key[:12]}"
             log_event(logger, "infra_auto_setting.script_cache.hit", key_prefix=cache_key[:12])
-            return cached, f"SCRIPT_CACHE_HIT: {cache_key[:12]}"
+            log_event(
+                logger,
+                "infra_auto_setting.script_cache.invalidated",
+                key_prefix=cache_key[:12],
+                issues=cached_issues,
+            )
 
         script = self._build_script(request, resolved_versions, prior_executions, package_manager)
         self._cache.put(
@@ -298,6 +313,8 @@ class InfraAutoSettingAgent:
     # script building                                                      #
     # ------------------------------------------------------------------ #
 
+    _MAX_REPAIR = 2
+
     def _build_script(
         self,
         request: UserRequest,
@@ -306,17 +323,143 @@ class InfraAutoSettingAgent:
         package_manager: str,
     ) -> str:
         fallback = self._build_script_fallback(request, versions, prior_executions, package_manager)
-        llm_result = self.llm.generate_install_script(
+
+        emit_event(owner="infra_build", phase="generate_script", status="started", message="인프라 스크립트를 LLM으로 생성합니다.")
+        script = self.llm.generate_install_script(
             request=request,
             resolved_versions=versions,
             package_manager=package_manager,
             prior_executions=prior_executions,
             fallback_script=fallback,
         )
-        script = llm_result if llm_result is not None else fallback
-        script = self._sanitize_generated_script(script, request, versions)
-        script = self._enforce_logging_directory_policy(script, request)
-        return self._enforce_java_runtime_policy(script, request, versions, package_manager)
+        if script is None:
+            log_event(logger, "infra_auto_setting.build_script.llm_unavailable")
+            emit_event(owner="infra_build", phase="generate_script", status="completed", message="LLM 생성 실패로 fallback 스크립트를 사용합니다.", details={"mode": "fallback"})
+            return fallback
+        emit_event(owner="infra_build", phase="generate_script", status="completed", message="LLM 스크립트 생성이 완료되었습니다.", details={"mode": "llm"})
+
+        for attempt in range(self._MAX_REPAIR):
+            emit_event(owner="infra_build", phase="validate_script", status="started", message="스크립트 내용 검증을 시작합니다.", details={"attempt": attempt + 1})
+            issues = self._validate_script_content(script, request, versions, package_manager)
+            if not issues:
+                emit_event(owner="infra_build", phase="validate_script", status="completed", message="스크립트 검증을 통과했습니다.")
+                return script
+            emit_event(owner="infra_build", phase="validate_script", status="failed", message="스크립트 검증에서 이슈가 발견되었습니다.", details={"issue_count": len(issues), "issues": issues})
+
+            emit_event(owner="infra_build", phase="repair_script", status="started", message="LLM으로 스크립트를 보정합니다.", details={"repair_round": attempt + 1})
+            log_event(logger, "infra_auto_setting.build_script.repair", attempt=attempt + 1, issue_count=len(issues))
+            repaired = self.llm.repair_script(
+                script=script,
+                issues=issues,
+                request=request,
+                resolved_versions=versions,
+                package_manager=package_manager,
+                fallback_script=fallback,
+            )
+            if repaired is None:
+                emit_event(owner="infra_build", phase="repair_script", status="failed", message="LLM 보정에 실패했습니다.", details={"repair_round": attempt + 1})
+                break
+            emit_event(owner="infra_build", phase="repair_script", status="completed", message="LLM 스크립트 보정이 완료되었습니다.", details={"repair_round": attempt + 1})
+            script = repaired
+
+        final_issues = self._validate_script_content(script, request, versions, package_manager)
+        if final_issues:
+            log_event(logger, "infra_auto_setting.build_script.fallback_after_repair", issues=final_issues)
+            emit_event(owner="infra_build", phase="generate_script", status="completed", message="보정 실패로 fallback 스크립트를 사용합니다.", details={"mode": "fallback", "remaining_issues": len(final_issues)})
+            return fallback
+        return script
+
+    # ------------------------------------------------------------------ #
+    # script content validation                                            #
+    # ------------------------------------------------------------------ #
+
+    def _validate_script_content(
+        self,
+        script: str,
+        request: UserRequest,
+        versions: dict[str, str],
+        package_manager: str,
+    ) -> list[str]:
+        issues: list[str] = []
+
+        if not self._bash_syntax_ok(script):
+            issues.append("Script has bash syntax errors (bash -n failed).")
+
+        for component in request.infra_tech_stack.components:
+            normalized = component.strip().lower()
+            if not self._script_addresses_component(script, normalized, versions):
+                issues.append(f"Component '{normalized}' is not addressed in the script.")
+
+        log_dirs = [d for d in (request.logging.base_dir, request.logging.gc_log_dir, request.logging.app_log_dir) if d]
+        for log_dir in log_dirs:
+            if log_dir not in script:
+                issues.append(f"Logging directory '{log_dir}' is not referenced in the script.")
+
+        for match in re.finditer(r"cp\s+-[a-zA-Z]*r[a-zA-Z]*\s+(\S+)\s+(\S+)", script):
+            src, dst = match.group(1).rstrip("/"), match.group(2).rstrip("/")
+            if dst.startswith(src + "/"):
+                issues.append(f"Self-referential copy: '{src}' into '{dst}'. Use an external path like /tmp.")
+
+        issues.extend(self._protected_path_write_issues(script, request.constraints.sudo_allowed))
+        return issues
+
+    def _protected_path_write_issues(self, script: str, sudo_allowed: str) -> list[str]:
+        if sudo_allowed == "no":
+            return []
+
+        issues: list[str] = []
+        for line_no, raw_line in enumerate(script.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line or line.startswith("#") or line.startswith("sudo "):
+                continue
+            if not self._contains_protected_path(line):
+                continue
+            if self._is_protected_write_command(line):
+                issues.append(f"Line {line_no} writes to a protected path without sudo: {line}")
+        return issues
+
+    @staticmethod
+    def _contains_protected_path(line: str) -> bool:
+        return any(prefix in line for prefix in PROTECTED_PATH_PREFIXES)
+
+    @staticmethod
+    def _is_protected_write_command(line: str) -> bool:
+        write_prefixes = (
+            "mkdir ",
+            "chmod ",
+            "chown ",
+            "cp ",
+            "mv ",
+            "install ",
+            "ln ",
+            "touch ",
+            "tee ",
+            "echo ",
+            "cat ",
+            "printf ",
+        )
+        return line.startswith(write_prefixes) or " >" in line or ">>" in line
+
+    def _script_addresses_component(self, script: str, component: str, versions: dict[str, str]) -> bool:
+        lower = script.lower()
+        if component == "java":
+            java_major = self._version_major(versions.get("java", ""))
+            if not java_major:
+                return True
+            return any(pkg in lower for pkg in [
+                f"openjdk-{java_major}-jdk",
+                f"java-{java_major}-openjdk",
+                f"java-{java_major}-amazon-corretto",
+            ])
+        if component == "apache":
+            return "httpd" in lower or "apache2" in lower
+        if component == "tomcat":
+            return "tomcat" in lower
+        if component == "kafka":
+            return "kafka" in lower
+        if component == "pinpoint":
+            return "pinpoint" in lower
+        return True
 
     def _build_script_fallback(
         self,
@@ -337,7 +480,7 @@ class InfraAutoSettingAgent:
         for component in request.infra_tech_stack.components:
             normalized = component.strip().lower()
             version = versions.get(component) or versions.get(normalized, "latest")
-            lines.extend(self._component_install_lines(normalized, version, package_manager, request.constraints.sudo_allowed))
+            lines.extend(self._component_install_lines(normalized, version, package_manager, request))
             lines.append("")
 
         lines.extend(self._logging_directory_block(request))
@@ -360,16 +503,28 @@ class InfraAutoSettingAgent:
         infra_os = request.infra_tech_stack.os.strip().lower()
         return "apt" if infra_os == "linux" else "unknown"
 
-    def _component_install_lines(self, component: str, version: str, package_manager: str, sudo_allowed: str) -> list[str]:
-        if component == "java":
-            # Java installation is fully managed by _enforce_java_runtime_policy; skip here.
-            return []
-
+    def _component_install_lines(self, component: str, version: str, package_manager: str, request: UserRequest) -> list[str]:
         if package_manager == "unknown":
             return [f"echo 'package manager unknown for component: {component}; manual install required'"]
 
-        prefix = self._sudo_prefix(sudo_allowed)
+        prefix = self._sudo_prefix(request.constraints.sudo_allowed)
         major = self._version_major(version)
+
+        if component == "java":
+            if not major:
+                return ["echo 'java version not specified; skipping'"]
+            java_pkg = self._java_package_name(request, package_manager, major)
+            if not java_pkg:
+                return [f"echo 'Unsupported package manager for Java install: {package_manager}'; exit 1"]
+            return [
+                f"{prefix}{package_manager} -y install {java_pkg}",
+                "JAVA_MAJOR=\"$(java -version 2>&1 | awk -F'[\\\".]' '/version/ {print $2}')\"",
+                f"if [ \"$JAVA_MAJOR\" != \"{major}\" ]; then",
+                f"  echo \"Requested Java {major}, but detected ${{JAVA_MAJOR}}.\"",
+                "  exit 1",
+                "fi",
+                f"echo \"Java {major} is installed and active.\"",
+            ]
 
         if component == "apache":
             if package_manager == "apt":
@@ -424,97 +579,8 @@ class InfraAutoSettingAgent:
         return merged.splitlines()[:10]
 
     # ------------------------------------------------------------------ #
-    # script post-processing                                               #
+    # script helpers                                                       #
     # ------------------------------------------------------------------ #
-
-    def _enforce_java_runtime_policy(
-        self,
-        script: str,
-        request: UserRequest,
-        resolved_versions: dict[str, str],
-        package_manager: str,
-    ) -> str:
-        if not self._requires_java(request):
-            return script
-        java_major = self._version_major(resolved_versions.get("java", ""))
-        if not java_major:
-            return script
-
-        marker = "# Enforce requested Java runtime"
-        if marker in script:
-            return script
-
-        prefix = self._sudo_prefix(request.constraints.sudo_allowed)
-        java_package = self._java_package_name(request, package_manager, java_major)
-        install_cmd = (
-            f"{prefix}{package_manager} -y install {java_package}"
-            if java_package
-            else f"echo 'Unsupported package manager for Java install: {package_manager}'; exit 1"
-        )
-
-        java_block = [
-            "",
-            marker,
-            install_cmd,
-            "JAVA_MAJOR=\"$(java -version 2>&1 | awk -F'[\\\".]' '/version/ {print $2}')\"",
-            f"if [ \"$JAVA_MAJOR\" != \"{java_major}\" ]; then",
-            f"  echo \"Requested Java {java_major}, but detected ${{JAVA_MAJOR}}.\"",
-            "  exit 1",
-            "fi",
-            f"echo \"Java {java_major} is installed and active.\"",
-            "",
-        ]
-        base = script if script.endswith("\n") else script + "\n"
-        return base + "\n".join(java_block)
-
-    def _sanitize_generated_script(
-        self,
-        script: str,
-        request: UserRequest,
-        resolved_versions: dict[str, str],
-    ) -> str:
-        java_major = self._version_major(resolved_versions.get("java", ""))
-        sanitized_lines: list[str] = []
-        skip_install_continuation = False
-
-        for raw_line in script.splitlines():
-            line = raw_line.strip()
-            if skip_install_continuation:
-                if self._continues_shell_command(line):
-                    continue
-                skip_install_continuation = False
-
-            if self._is_logging_directory_line(line, request):
-                continue
-
-            if self._is_package_install_line(line):
-                if self._line_mentions_java_or_gradle(line, java_major):
-                    skip_install_continuation = self._continues_shell_command(line)
-                    continue
-
-            if self._line_mentions_java_or_gradle(line, java_major):
-                continue
-
-            sanitized_lines.append(raw_line)
-
-        return "\n".join(sanitized_lines).strip() + "\n"
-
-    def _is_package_install_line(self, line: str) -> bool:
-        return bool(re.search(r"\b(?:sudo\s+)?(?:dnf|yum|apt|apt-get)\b.*\binstall\b", line))
-
-    def _line_mentions_java_or_gradle(self, line: str, java_major: str) -> bool:
-        java_pattern = rf"\b(openjdk-{java_major}-jdk|java-{java_major}-openjdk(?:-devel)?|java-{java_major}-amazon-corretto(?:-devel)?)\b" if java_major else r"$^"
-        # Only strip Gradle *install* commands, not comments or env-var references.
-        gradle_install_pattern = r"\b(?:dnf|yum|apt|apt-get)\b.*\bgradle\b"
-        return bool(re.search(java_pattern, line) or re.search(gradle_install_pattern, line))
-
-    def _enforce_logging_directory_policy(self, script: str, request: UserRequest) -> str:
-        """Guard: appends logging block if not already present (e.g. in LLM-generated scripts)."""
-        marker = "# Provision log directories"
-        if marker in script:
-            return script
-        base = script if script.endswith("\n") else script + "\n"
-        return base + "\n".join(self._logging_directory_block(request))
 
     def _logging_directory_block(self, request: UserRequest) -> list[str]:
         prefix = self._sudo_prefix(request.constraints.sudo_allowed)
@@ -528,12 +594,6 @@ class InfraAutoSettingAgent:
             f"{prefix}chmod 755 {log_dirs}",
             "",
         ]
-
-    def _is_logging_directory_line(self, line: str, request: UserRequest) -> bool:
-        logging_paths = (request.logging.base_dir, request.logging.gc_log_dir, request.logging.app_log_dir)
-        if not any(path in line for path in logging_paths):
-            return False
-        return "mkdir -p" in line or re.search(r"\bchmod\s+755\b", line) is not None
 
     # ------------------------------------------------------------------ #
     # Java helpers                                                         #
@@ -566,6 +626,21 @@ class InfraAutoSettingAgent:
     # ------------------------------------------------------------------ #
 
     @staticmethod
+    def _bash_syntax_ok(script: str) -> bool:
+        """Return True if ``bash -n`` accepts the script (syntax-only check)."""
+        try:
+            result = subprocess.run(
+                ["bash", "-n"],
+                input=script,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return True  # if bash unavailable, skip check
+
+    @staticmethod
     def _sudo_prefix(sudo_allowed: str) -> str:
         return "sudo " if sudo_allowed in {"yes", "limited"} else ""
 
@@ -587,8 +662,3 @@ class InfraAutoSettingAgent:
         while len(parts) < 3:
             parts.append(0)
         return parts[0], parts[1], parts[2]
-
-    @staticmethod
-    def _continues_shell_command(line: str) -> bool:
-        stripped = line.rstrip()
-        return stripped.endswith("\\") or stripped.endswith("&&") or stripped.endswith("||")

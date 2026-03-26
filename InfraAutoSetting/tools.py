@@ -75,6 +75,35 @@ class InfraTools(BaseTools):
                         "severity": "error",
                     }
                 )
+            for match in re.finditer(r"cp\s+-[a-zA-Z]*r[a-zA-Z]*\s+(\S+)\s+(\S+)", content):
+                src, dst = match.group(1).rstrip("/"), match.group(2).rstrip("/")
+                if dst.startswith(src + "/"):
+                    issues.append(
+                        {
+                            "code": "V_SELF_REF_COPY",
+                            "message": f"cp copies '{src}' into itself ('{dst}'). Use an external backup path like /tmp.",
+                            "severity": "error",
+                        }
+                    )
+
+            try:
+                syntax_check = subprocess.run(
+                    ["bash", "-n", str(path)],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                if syntax_check.returncode != 0:
+                    issues.append(
+                        {
+                            "code": "V_BASH_SYNTAX",
+                            "message": f"Bash syntax error: {syntax_check.stderr.strip()}",
+                            "severity": "error",
+                        }
+                    )
+            except Exception:
+                pass
+
             if request.logging.base_dir not in content:
                 issues.append(
                     {
