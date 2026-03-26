@@ -72,29 +72,28 @@ plan_spec → generate_files → validate_files
 `APPLICATION_SPEC.md`는 항상 가장 먼저 생성된다.
 
 **`resolve_file_content()` 처리 경로:**
-- Board 템플릿 파일 → `templates/board/` 디렉터리에서 직접 읽기
+- Spring Board 템플릿 파일 → `spring_template/board/` 디렉터리에서 직접 읽기 (`_BOARD_FILE_MAP` 매핑)
+- FastAPI Board 템플릿 파일 → `fastapi_template/board/` 디렉터리에서 직접 읽기 (`_FASTAPI_BOARD_FILE_MAP` 매핑)
 - `Dockerfile` → `render_dockerfile_template()` (framework/build_system별 tmpl 파일)
 - `pom.xml` → `spring_template/pom.xml.tmpl` + substitution
 - `build.gradle` → `spring_template/build.gradle.tmpl` + substitution
 - `settings.gradle` → `spring_template/settings.gradle.tmpl` + substitution
 - `gradlew`, `gradlew.bat` → `spring_template/gradlew.tmpl`, `gradlew.bat.tmpl` (raw 내용)
 - `gradle/wrapper/gradle-wrapper.properties` → `spring_template/gradle-wrapper.properties.tmpl` + GRADLE_VERSION substitution
-- Spring main class (app_id 기반 경로) → `spring_template/SpringApplication.java` + class name str.replace
 - `application.yml` → `spring_template/application.yml.tmpl` + LOG_DIR substitution
-- `requirements.txt` → `fastapi_template/requirements.txt` 직접 읽기
+- `app/main.py` → `fastapi_template/main.py` 직접 읽기
 - `.env.example` → `required_env()` 목록 + `APP_LOG_DIR` 조합
-- `app/main.py` → `fastapi_template/main.py` + substitution; `memory_leak` 시 `fastapi_template/leak_block.py` 내용 추가
-- `DemoController.java` → `spring_template/DemoController.java` 직접 읽기
 
 **템플릿 디렉터리 구조:**
 
 `spring_template/`:
 - `.tmpl` (substitution 필요): `pom.xml.tmpl`, `build.gradle.tmpl`, `settings.gradle.tmpl`, `application.yml.tmpl`, `gradlew.tmpl`, `gradlew.bat.tmpl`, `gradle-wrapper.properties.tmpl`, `docker_template_java_gradle.tmpl`, `docker_template_java_maven.tmpl`
-- 소스 파일 (직접 읽기): `SpringApplication.java`, `DemoController.java`, `BoardApplication.java`
+- `board/` (소스 파일 직접 읽기 — 10개): `BoardApplication.java`, `model/Post.java`, `dto/PostRequest.java`, `dto/PostResponse.java`, `repository/InMemoryPostRepository.java`, `service/PostService.java`, `controller/PostController.java`, `exception/NotFoundException.java`, `exception/GlobalExceptionHandler.java`, `test/PostControllerTest.java`
 
 `fastapi_template/`:
 - `.tmpl` (substitution 필요): `docker_template_python_fastapi.tmpl`
-- 소스 파일 (직접 읽기): `main.py`, `requirements.txt`, `leak_block.py`
+- 소스 파일 (직접 읽기): `main.py`
+- `board/` (소스 파일 직접 읽기 — 9개): `__init__.py`, `models.py`, `schemas.py`, `repository.py`, `service.py`, `router.py`, `exceptions.py`, `tests/__init__.py`, `tests/test_board_router.py`
 
 **`sanitize_file_plan()` 차단 규칙:**
 - `.kts` 확장자 파일 (Kotlin build script)
@@ -104,16 +103,24 @@ plan_spec → generate_files → validate_files
 
 **필수 파일 보강 (`ensure_required_file_plan()`):**
 - FastAPI: `requirements.txt`, `app/main.py`, `Dockerfile`
+- FastAPI + Board CRUD (`app/board/` 경로 존재 시): 9개 파일 세트 전체 보강
 - Spring/Spring Boot (Maven): `pom.xml`, `application.yml`, `Dockerfile`, 진입점 Java 파일
 - Spring/Spring Boot (Gradle): `settings.gradle`, `build.gradle`, `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.properties`, `application.yml`, `Dockerfile`, 진입점 Java 파일
-- Board CRUD 경로 존재 시: 9개 파일 세트 전체 보강
+- Spring + Board CRUD (`src/main/java/com/example/board/` 경로 존재 시): 10개 파일 세트 전체 보강
 
-**Board CRUD 파일 세트 (9개):**
+**Spring Board CRUD 파일 세트 (10개):**
+- `BoardApplication.java` (Spring Boot entrypoint)
 - `model/Post.java`, `dto/PostRequest.java`, `dto/PostResponse.java`
 - `repository/InMemoryPostRepository.java`, `service/PostService.java`
-- `controller/BoardController.java`
+- `controller/PostController.java`
 - `exception/NotFoundException.java`, `exception/GlobalExceptionHandler.java`
-- `test/BoardControllerTest.java`
+- `test/PostControllerTest.java`
+
+**FastAPI Board CRUD 파일 세트 (9개):**
+- `app/board/__init__.py`, `app/board/models.py`, `app/board/schemas.py`
+- `app/board/repository.py`, `app/board/service.py`
+- `app/board/router.py`, `app/board/exceptions.py`
+- `app/board/tests/__init__.py`, `app/board/tests/test_board_router.py`
 
 ### 6. Validation Rules
 `SampleAppTools.code_validator()`는 아래를 검증한다:
@@ -125,6 +132,7 @@ plan_spec → generate_files → validate_files
 **FastAPI:**
 - `app/main.py` 존재 여부
 - `Dockerfile`에 `uvicorn` 포함 여부
+- Board CRUD 파일 세트가 불완전하면 각 누락 파일별 이슈 생성 (`app/board/` 경로 존재 시)
 
 **Spring / Spring Boot:**
 - `pom.xml` 또는 `build.gradle` 존재 여부
