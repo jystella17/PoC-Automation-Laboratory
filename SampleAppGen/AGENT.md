@@ -45,6 +45,7 @@ plan_spec → generate_files → validate_files
 - 프레임워크가 `FastAPI`면 Python 계열 언어를 우선 선택하고 기본값은 `Python3.12`다.
 - 프레임워크가 `Spring` 또는 `Spring Boot`면 Java 계열 언어를 우선 선택하고 기본값은 `Java17`이다.
 - Java 계열의 빌드 시스템은 `app_tech_stack.build_system`을 우선 사용하고, `auto`면 기본값은 Maven이다.
+- `additional_request`에 `gradle`이 포함되어 있으면 Java 계열의 `auto` 요청도 Gradle로 해석한다.
 - `additional_request`에서 아래 특수 시나리오를 감지한다 (영문/한글 모두 인식):
   - `memory leak`, `메모리 릭`, `threadlocal` → `memory_leak`
   - `oom`, `out of memory`, `outofmemory` → `oom`
@@ -54,8 +55,9 @@ plan_spec → generate_files → validate_files
 - 예: `spring-boot-3-5-0-1-board-crud` → `spring-boot-3-5-0-1-board-crud`
 
 **계획 흐름:**
-1. LLM `plan_application()` 성공 → `normalize_plan()` 적용 (language/build_system/runtime_version 정규화, file_plan sanitize+보강)
-2. LLM 실패(None) → `fallback_plan()` 직접 사용
+1. LLM `plan_application()` 성공 → `normalize_plan()` 적용
+2. `normalize_plan()`은 language/build_system/runtime_version 정규화, `sanitize_file_plan()` 적용, `ensure_required_file_plan()` 보강을 수행한다.
+3. LLM 실패(None) → `fallback_plan()` 직접 사용
 
 산출 프로젝트는 `generated_apps/{app_id}`에 생성된다.
 
@@ -80,9 +82,10 @@ plan_spec → generate_files → validate_files
 - `settings.gradle` → `spring_template/settings.gradle.tmpl` + substitution
 - `gradlew`, `gradlew.bat` → `spring_template/gradlew.tmpl`, `gradlew.bat.tmpl` (raw 내용)
 - `gradle/wrapper/gradle-wrapper.properties` → `spring_template/gradle-wrapper.properties.tmpl` + GRADLE_VERSION substitution
-- `application.yml` → `spring_template/application.yml.tmpl` + LOG_DIR substitution
+- `src/main/resources/application.yml` 및 `*application.yml` → `spring_template/application.yml.tmpl` + LOG_DIR substitution
 - `app/main.py` → `fastapi_template/main.py` 직접 읽기
 - `.env.example` → `required_env()` 목록 + `APP_LOG_DIR` 조합
+- `README.md` → 간단한 framework/language 안내 markdown
 
 **템플릿 디렉터리 구조:**
 
@@ -108,13 +111,17 @@ plan_spec → generate_files → validate_files
 - Spring/Spring Boot (Gradle): `settings.gradle`, `build.gradle`, `gradlew`, `gradlew.bat`, `gradle/wrapper/gradle-wrapper.properties`, `application.yml`, `Dockerfile`, 진입점 Java 파일
 - Spring + Board CRUD (`src/main/java/com/example/board/` 경로 존재 시): 10개 파일 세트 전체 보강
 
+주의:
+- Gradle wrapper `jar` (`gradle/wrapper/gradle-wrapper.jar`)는 생성하지 않는다.
+- `.env.example`, `README.md`는 fallback file plan에서 기본 제공되지만, `ensure_required_file_plan()`의 강제 보강 대상은 아니다.
+
 **Spring Board CRUD 파일 세트 (10개):**
 - `BoardApplication.java` (Spring Boot entrypoint)
 - `model/Post.java`, `dto/PostRequest.java`, `dto/PostResponse.java`
 - `repository/InMemoryPostRepository.java`, `service/PostService.java`
 - `controller/PostController.java`
 - `exception/NotFoundException.java`, `exception/GlobalExceptionHandler.java`
-- `test/PostControllerTest.java`
+- `src/test/java/com/example/board/PostControllerTest.java`
 
 **FastAPI Board CRUD 파일 세트 (9개):**
 - `app/board/__init__.py`, `app/board/models.py`, `app/board/schemas.py`
@@ -132,14 +139,16 @@ plan_spec → generate_files → validate_files
 **FastAPI:**
 - `app/main.py` 존재 여부
 - `Dockerfile`에 `uvicorn` 포함 여부
-- Board CRUD 파일 세트가 불완전하면 각 누락 파일별 이슈 생성 (`app/board/` 경로 존재 시)
+- `app/board/` 경로가 존재하는 경우, 핵심 Board 지원 파일 7종(`__init__.py`, `models.py`, `schemas.py`, `repository.py`, `service.py`, `router.py`, `exceptions.py`) 누락 여부를 검증한다.
+- FastAPI board 테스트 파일(`app/board/tests/...`)은 생성 대상일 수 있지만 현재 validator의 필수 검증 대상은 아니다.
 
 **Spring / Spring Boot:**
 - `pom.xml` 또는 `build.gradle` 존재 여부
-- `@SpringBootApplication` + `main(String[] args)` + `SpringApplication.run(...)` 진입점 존재 여부
+- `@SpringBootApplication` + `main(String[] args)` + (`SpringApplication.run(...)` 또는 `new SpringApplication(...).run(...)`) 진입점 존재 여부
 - Spring entrypoint가 여러 개면 실패
 - `jakarta.validation` 사용 시 `spring-boot-starter-validation` 의존성 존재 여부
-- Board CRUD 파일 세트가 불완전하면 각 누락 파일별 이슈 생성
+- `src/main/java/com/example/board/` 경로가 존재하는 경우, 핵심 Board 지원 파일 9종(`BoardApplication.java`, `Post.java`, `PostRequest.java`, `PostResponse.java`, `InMemoryPostRepository.java`, `PostService.java`, `PostController.java`, `NotFoundException.java`, `GlobalExceptionHandler.java`) 누락 여부를 검증한다.
+- Spring board 테스트 파일(`src/test/java/com/example/board/PostControllerTest.java`)은 생성 대상일 수 있지만 현재 validator의 필수 검증 대상은 아니다.
 - `Dockerfile`은 `ENTRYPOINT ["java", "-jar", ...]` 형태여야 함
 - `sh -c` 형태의 entrypoint 사용 시 실패
 
@@ -157,6 +166,9 @@ plan_spec → generate_files → validate_files
 | `pom.xml` 존재 + 로컬 `mvn` 설치 | `mvn -q -DskipTests package` |
 
 빌드 timeout: 1800초
+
+추가 동작:
+- 위 빌드 명령을 선택하지 못하더라도, `build/libs/*.jar` 또는 `target/*.jar`에 이미 패키징된 jar가 있으면 그 산출물을 재사용한다.
 
 아티팩트 탐색:
 - Gradle: `build/libs/*.jar` (`-plain.jar` 제외)
@@ -180,7 +192,8 @@ plan_spec → generate_files → validate_files
 
 **Docker 이미지 전송 방식:**
 - `docker build` 로컬 빌드 → `docker image save | ssh docker load` 스트리밍 방식으로 대상 서버에 적재
-- 적재 성공 후 `docker run` 명령 원격 실행
+- plan의 `deployment_commands` 중 첫 번째 `docker run ...` 명령이 있으면, image ref를 새 timestamp tag로 치환한 뒤 원격 실행한다.
+- `docker run` 명령이 없으면 이미지 적재까지만 수행한다.
 
 **Docker run 포트 충돌 failover:**
 - `docker run` 실패 시 포트 충돌 여부 판단 (`port is already allocated`, `address already in use`, `bind:`)
@@ -206,7 +219,7 @@ plan_spec → generate_files → validate_files
 - `agent`는 항상 `sample_app`
 - `success`는 `docker_build` 성공 여부를 따른다
 - `executed_commands`에는 `execution_file_write`, `code_validator`, `build_code`, `docker_build` 요약 문자열 포함
-- `notes`에는 빌드/Docker 오류, 배포 명령, 이미지 참조, LLM/fallback 여부, VALIDATION_ERROR 요약이 기록된다
+- `notes`에는 빌드/Docker 오류, 배포 명령, 이미지 참조, LLM 사용 가능 여부, `VALIDATION_ERROR` 요약이 기록된다
 
 ### 9. Generated Outputs Conventions
 주요 산출물:

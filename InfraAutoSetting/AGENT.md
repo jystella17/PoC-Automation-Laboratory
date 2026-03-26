@@ -3,7 +3,7 @@
 ### 1. Role & Responsibility
 - Supervisor가 전달한 `UserRequest`를 기준으로 인프라 bootstrap script를 생성하고 원격 서버에 적용한다.
 - 현재 지원 컴포넌트: `apache`, `tomcat`, `kafka`, `pinpoint`, `java`
-- 로그 디렉터리 생성 정책과 Java 런타임 정책을 스크립트에 강제한다.
+- 로그 디렉터리 생성 정책을 fallback 스크립트에 강제하고, LLM 생성 스크립트도 검증 단계에서 로그 경로 누락 여부를 점검한다.
 - 동일 요청에 대해 Redis 기반 스크립트 캐싱을 통해 LLM 재호출을 방지한다.
 - 스크립트 검증 후 SSH 실행 결과를 `InfraBuildRunResult`로 반환한다.
 
@@ -26,12 +26,15 @@
 
 1. **버전 보정** (`_resolve_versions`): `VERSION_CATALOG` 기준으로 major-only 입력을 full 버전으로 치환
 2. **캐시 조회** (`_resolve_script`): Redis에서 동일 요청 캐시 확인
-   - 캐시 히트 → 저장된 스크립트 즉시 반환 (`SCRIPT_CACHE_HIT`)
+   - 캐시 히트 → 저장된 스크립트를 내용 검증 후 재사용 (`SCRIPT_CACHE_HIT`)
+   - 캐시된 스크립트가 현재 검증 기준에 맞지 않으면 무효화하고 새로 생성
    - 캐시 미스 → 3번으로 진행
 3. **스크립트 생성** (`_build_script`):
+   - deterministic fallback 스크립트를 먼저 구성
    - LLM 호출 우선 (`InfraScriptGeneratorLLM.generate_install_script`)
-   - LLM 실패(None 반환) 시 deterministic fallback 스크립트 사용
-   - post-processing: sanitize → logging directory 정책 → Java 런타임 정책 적용
+   - LLM 실패(None 반환) 시 fallback 스크립트 사용
+   - LLM 응답이 있으면 최대 2회까지 validate/repair loop 수행
+   - 최종 검증 실패 시 fallback 스크립트 사용
 4. **캐시 저장**: 생성 스크립트를 Redis에 TTL과 함께 저장 (`SCRIPT_CACHE_MISS`)
 5. **`execution_file_write`**: 스크립트 파일 기록
 6. **`code_validator`**: 정적 검증
@@ -59,15 +62,16 @@
 - 대상 OS 기준 패키지 관리자 선택:
   - `Ubuntu`, `Debian` → `apt`
   - `RHEL`, `Amazon Linux`, `CentOS`, `Rocky Linux`, `Fedora`, `AlmaLinux` 계열 → `dnf`
-  - 판별 불가 시 `unknown` (echo 안내만 출력)
+  - target 기준 판별이 안 되면 `infra_tech_stack.os == linux`일 때 `apt`, 그 외는 `unknown`
 - `constraints.sudo_allowed`가 `yes` 또는 `limited`면 설치/디렉터리 명령에 `sudo` 사용
-- 항상 로그 디렉터리 생성 블록 포함
-- Java가 필요한 스택이면 요청된 Java major 버전 강제 설치/검증 블록 추가
+- fallback 스크립트는 항상 로그 디렉터리 생성 블록 포함
+- LLM 스크립트는 로그 디렉터리 및 각 컴포넌트 반영 여부를 별도 검증한다
 
 **LLM vs Fallback:**
 - LLM이 유효한 스크립트를 반환하면 LLM 결과를 사용
 - LLM 미응답/실패 시 deterministic fallback 스크립트 사용
-- 어느 경우든 post-processing (sanitize, logging, java policy) 동일하게 적용
+- LLM 응답은 bash syntax, 컴포넌트 반영, 로그 경로 반영, self-referential copy, 보호 경로 write-sudo 규칙으로 검증
+- 검증 실패 시 LLM repair를 최대 2회 시도한 뒤, 계속 실패하면 fallback 스크립트로 전환
 
 **컴포넌트별 설치 흐름:**
 
@@ -84,23 +88,19 @@
   - `apt`: `kafka={version}*` 버전 핀 시도 → 실패 시 `kafka` fallback
   - `dnf`: `kafka-{version}*` 버전 핀 시도 → 실패 시 `kafka` fallback
 - `java`
-  - `_component_install_lines()`에서 skip (빈 리스트 반환)
-  - 전적으로 `_enforce_java_runtime_policy()`가 담당 (Section 6 참고)
+  - `java` 컴포넌트가 명시적으로 요청된 경우에만 패키지 설치 및 `java -version` major 검증 블록 생성
+  - `apt`: `openjdk-{major}-jdk`
+  - `dnf` + Amazon Linux → `java-{major}-amazon-corretto-devel`
+  - `dnf` + 기타 → `java-{major}-openjdk-devel`
 - `pinpoint`
   - placeholder 성격의 echo 안내만 출력
 
 ### 6. Java Runtime Policy
-아래 조건 중 하나면 Java 설치 강제 로직을 포함한다:
-- 컴포넌트에 `tomcat` 또는 `kafka` 포함
-- 앱 프레임워크가 `spring` 또는 `spring boot`
-- 앱 언어가 Java 계열
+현재 코드 기준으로 `_requires_java()` 헬퍼는 존재하지만 실행 경로에서 사용되지 않는다.
 
-패키지명 규칙:
-- `apt` → `openjdk-{major}-jdk`
-- `dnf` + Amazon Linux → `java-{major}-amazon-corretto-devel`
-- `dnf` + 기타 → `java-{major}-openjdk-devel`
-
-설치 후 `java -version`으로 실제 major 버전을 검증하며, 불일치 시 `exit 1` 처리한다.
+- fallback 스크립트에서 Java 설치/검증은 `java` 컴포넌트가 요청에 포함된 경우에만 수행된다.
+- `tomcat`, `kafka`, `spring`, Java 언어 앱이라는 이유만으로 별도 Java 설치 블록을 자동 추가하지는 않는다.
+- LLM은 프롬프트 상 Java 정책을 참고할 수 있지만, 강제 보장은 검증 로직으로 구현되어 있지 않다.
 
 ### 7. Script Caching Policy
 Redis 기반 캐시를 사용해 동일 요청에 대한 LLM 재호출을 방지한다.
@@ -120,8 +120,9 @@ Redis 저장 키: `infra:script_cache:{위 캐시 키}`
 - TTL: 7일 (Redis `SETEX` 네이티브 TTL로 관리)
 - 캐시 히트: `SCRIPT_CACHE_HIT: {key_prefix}` notes 기록
 - 캐시 미스: `SCRIPT_CACHE_MISS: {key_prefix}` notes 기록
+- 캐시 히트 스크립트도 현재 검증 규칙으로 재검사하며, 검증 실패 시 재생성 후 다시 저장한다
 - Redis 연결 실패 시 캐시 miss로 처리하고 에이전트는 정상 동작 유지
-- `SUPERVISOR_REDIS_URL` 환경변수로 Redis 연결 설정 (기본: `redis://127.0.0.1:6379/0`)
+- Redis 연결은 `runtime_bus.create_redis()` 경유로 생성한다
 
 **캐시 키 정규화:**
 - components: lowercase, strip, 정렬
@@ -133,11 +134,18 @@ Redis 저장 키: `infra:script_cache:{위 캐시 키}`
 - `set -euo pipefail` 포함 여부
 - 위험 명령 `rm -rf /` 존재 여부
 - `sudo_allowed=no`인데 `sudo` 명령 포함 여부 (multiline 전체 스캔)
+- self-referential recursive copy 여부 (`cp -r src src/...`)
+- `bash -n` 문법 검사
 - `logging.base_dir`가 스크립트에 참조되는지 여부
 
 판정 규칙:
 - `error` severity가 하나라도 있으면 `ok=false`
 - `logging.base_dir` 누락은 `warning` (실행은 계속)
+
+추가로 스크립트 생성/캐시 검증 단계의 `_validate_script_content()`는 아래도 확인한다:
+- 요청된 각 컴포넌트가 스크립트에서 실제로 다뤄지는지
+- `logging.base_dir`, `gc_log_dir`, `app_log_dir` 모두가 참조되는지
+- `sudo_allowed != no`인 상황에서 `/var`, `/etc`, `/usr`, `/opt` 하위 보호 경로 write 명령에 `sudo`가 빠지지 않았는지
 
 ### 9. Remote Execution Policy
 `InfraTools.ssh()` 동작 규칙:
@@ -165,7 +173,7 @@ Redis 저장 키: `infra:script_cache:{위 캐시 키}`
 `execution` 규칙:
 - `agent`는 항상 `infra_build`
 - `executed_commands`에는 `execution_file_write`, `code_validator`, `ssh` 요약 문자열 포함
-- `notes`에 포함 가능한 항목: 버전 보정, 캐시 상태, SSH 모드, 대상 호스트, SSH 인증 방식, 실패 stderr/stdout 요약 (최대 400자)
+- `notes`에 포함 가능한 항목: 버전 보정, 캐시 상태, SSH 모드, 대상 호스트, SSH 인증 방식, SSH 포트, 실패 stderr/stdout 요약 (각 최대 2000자)
 
 ### 11. Default Returned Lists
 정상 실행 시 기본 반환값:
